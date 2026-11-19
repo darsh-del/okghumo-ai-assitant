@@ -1,0 +1,82 @@
+{
+  "app/__init__.py": {
+    "mtime": 1794316486.7,
+    "ast_hash": "d41d8cd98f00b204e9800998ecf8427e",
+    "semantic_hash": ""
+  },
+  "app/main.py": {
+    "mtime": 1794730779.46,
+    "ast_hash": "de911b470867a494f5b0e20e793dcf1c",
+    "semantic_hash": ""
+  },
+  "app/mcp_auth.py": {
+    "mtime": 1794380134.37,
+    "ast_hash": "f768bb5293e2a472fe9de023d13ae1b8",
+    "semantic_hash": ""
+  },
+  "app/rbac.py": {
+    "mtime": 1794370580.06,
+    "ast_hash": "a7ef967c9fbd9d27d94309f66ccba82e",
+    "semantic_hash": ""
+  },
+  "deploy/deploy.sh": {
+    "mtime": 1794730779.47,
+    "ast_hash": "74d78d0f27c0ca727bdfb998885c7ce2",
+    "semantic_hash": ""
+  },
+  "frontend/main.js": {
+    "mtime": 1794730779.51,
+    "ast_hash": "43ebd3fee99350f8751418de555be5ec",
+    "semantic_hash": ""
+  },
+  "frontend/package.json": {
+    "mtime": 1794730784.87,
+    "ast_hash": "dac4d723c373dcd8b7780be7e4fee711",
+    "semantic_hash": ""
+  },
+  "frontend/vite.config.js": {
+    "mtime": 1794730779.49,
+    "ast_hash": "7bea9b6528bb846a66044b896f7dae0e",
+    "semantic_hash": ""
+  },
+  "tests/test_chat.py": {
+    "mtime": 1794380134.41,
+    "ast_hash": "1f569127afab5767284a6a88c94e8e1b",
+    "semantic_hash": ""
+  },
+  ".github/workflows/ci.yml": {
+    "mtime": 1794894949.93,
+    "ast_hash": "abfd6190ead8ccb753e6d273f133c8e6",
+    "semantic_hash": ""
+  },
+  "CLAUDE.md": {
+    "mtime": 1794380211.89,
+    "ast_hash": "7c4d8bce8e1137bfc631fd33ab34357b",
+    "semantic_hash": ""
+  },
+  "DESIGN.md": {
+    "mtime": 1794400536.14,
+    "ast_hash": "02ceb0b58a44c36c5ce1efd5442e1e6a",
+    "semantic_hash": ""
+  },
+  "README.md": {
+    "mtime": 1794380211.92,
+    "ast_hash": "4f1db8443d7877f216217d7bc72d7c3d",
+    "semantic_hash": ""
+  },
+  "docker-compose.yml": {
+    "mtime": 1794894949.89,
+    "ast_hash": "a4d476007d8a4c64cb8ce897fcf42bac",
+    "semantic_hash": ""
+  },
+  "frontend/index.html": {
+    "mtime": 1794730779.51,
+    "ast_hash": "0f303090c51047dfe865a6fef59b06f4",
+    "semantic_hash": ""
+  },
+  "requirements.txt": {
+    "mtime": 1794316486.7,
+    "ast_hash": "b19a00837b0a167ea86fa3f82a14ebc6",
+    "semantic_hash": ""
+  }
+}

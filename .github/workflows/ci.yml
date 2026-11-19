@@ -1,0 +1,58 @@
+name: CI/CD
+
+on:
+  push:
+    branches: [dev]
+  pull_request:
+    branches: [dev, main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - run: python -m pytest -q
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci && npm run build
+        working-directory: frontend
+
+  deploy:
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
+    runs-on: ubuntu-latest
+    concurrency: deploy-dev   # never run two deploys at once
+    env:
+      HOST: ${{ secrets.EC2_HOST }}
+      SSH: ssh -i key.pem -o StrictHostKeyChecking=yes -o UserKnownHostsFile=known_hosts
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check deploy secrets
+        env:
+          EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
+        run: |
+          [ -n "$HOST" ] || { echo "::error::EC2_HOST secret is empty (Settings > Secrets and variables > Actions > Repository secrets)"; exit 1; }
+          [ -n "$EC2_SSH_KEY" ] || { echo "::error::EC2_SSH_KEY secret is empty (Settings > Secrets and variables > Actions > Repository secrets)"; exit 1; }
+      - name: Prepare SSH
+        run: |
+          echo "${{ secrets.EC2_SSH_KEY }}" > key.pem && chmod 600 key.pem
+          # ponytail: trusts the host key seen now; pin EC2_KNOWN_HOSTS secret if MITM matters
+          ssh-keyscan -H "$HOST" > known_hosts
+      - name: Ship code (tracked files only, no secrets)
+        run: |
+          git archive --format=tar.gz HEAD -o app.tgz
+          scp -i key.pem -o UserKnownHostsFile=known_hosts app.tgz "ec2-user@$HOST:~/app.tgz"
+      - name: Build and restart
+        run: |
+          $SSH "ec2-user@$HOST" 'set -e
+            rm -rf ~/okghumo && mkdir ~/okghumo && tar xzf ~/app.tgz -C ~/okghumo && cd ~/okghumo
+            docker rm -f chat caddy 2>/dev/null || true   # clears hand-started containers once
+            docker compose up -d --build
+            for i in $(seq 1 20); do curl -fs localhost:8000/health && echo " deployed: healthy" && exit 0; sleep 3; done
+            docker compose logs --tail 30 chat; exit 1'

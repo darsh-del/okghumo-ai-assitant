@@ -1,0 +1,39 @@
+# API + Caddy (HTTPS). Secrets live OUTSIDE the repo in ../chat.env (override with ENV_FILE=...).
+services:
+  chat:
+    build: .
+    container_name: chat
+    restart: unless-stopped
+    env_file: ${ENV_FILE:-../chat.env}
+    volumes:
+      - appdata:/data            # sqlite: credentials, reminders, inbox
+    ports:
+      - "127.0.0.1:8000:8000"   # only Caddy on this host can reach it
+
+  scheduler:                     # EXACTLY ONE instance: fires due reminders into the inbox
+    build: .
+    container_name: scheduler
+    restart: unless-stopped
+    env_file: ${ENV_FILE:-../chat.env}
+    command: ["python", "-m", "app.scheduler"]
+    volumes:
+      - appdata:/data
+    depends_on:
+      - chat
+
+  caddy:
+    image: caddy:2
+    container_name: caddy
+    restart: unless-stopped
+    network_mode: host           # Caddyfile proxies to localhost:8000
+    environment:
+      CHAT_DOMAIN: ${CHAT_DOMAIN:-chat-api.okghumo.com}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data         # keeps issued certificates across restarts
+    depends_on:
+      - chat
+
+volumes:
+  appdata:
+  caddy_data:
