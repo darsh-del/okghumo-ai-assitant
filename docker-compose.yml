@@ -16,6 +16,8 @@ services:
     restart: unless-stopped
     env_file: ${ENV_FILE:-../chat.env}
     command: ["python", "-m", "app.scheduler"]
+    healthcheck:
+      disable: true              # image HEALTHCHECK probes the API on :8000; the scheduler serves no HTTP
     volumes:
       - appdata:/data
     depends_on:
