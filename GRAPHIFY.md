@@ -6,6 +6,7 @@ without reading every file.
 ## Contents
 - `GRAPH_REPORT.md` — summary: god nodes, communities, surprising connections. Start here.
 - `graph.html` — interactive view; open in a browser.
+- `../.graphifyignore` — excludes `graphify/` itself from scans (otherwise its cache gets indexed).
 - `graph.json` — raw graph (nodes/edges) used by the CLI queries.
 - `manifest.json`, `cache/` — incremental-update state; don't edit.
 

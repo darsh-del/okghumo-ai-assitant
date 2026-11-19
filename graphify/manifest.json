@@ -4,14 +4,29 @@
     "ast_hash": "d41d8cd98f00b204e9800998ecf8427e",
     "semantic_hash": ""
   },
+  "app/auth.py": {
+    "mtime": 1794992585.72,
+    "ast_hash": "e61709b1ee94e7ff7958349f2fad0ffb",
+    "semantic_hash": ""
+  },
+  "app/credentials.py": {
+    "mtime": 1794992585.65,
+    "ast_hash": "069f932dcbcf9be535da1c7eba41ad50",
+    "semantic_hash": ""
+  },
+  "app/db.py": {
+    "mtime": 1794992593.45,
+    "ast_hash": "fc1ff8bcb9f57f73fe07698f98c5f9d2",
+    "semantic_hash": ""
+  },
   "app/main.py": {
-    "mtime": 1794730779.46,
-    "ast_hash": "de911b470867a494f5b0e20e793dcf1c",
+    "mtime": 1794992593.57,
+    "ast_hash": "4a9eead24af11a6a393f54f8d2d01da6",
     "semantic_hash": ""
   },
   "app/mcp_auth.py": {
-    "mtime": 1794380134.37,
-    "ast_hash": "f768bb5293e2a472fe9de023d13ae1b8",
+    "mtime": 1794992585.69,
+    "ast_hash": "5dadd645bcee39598b374826eba67321",
     "semantic_hash": ""
   },
   "app/rbac.py": {
@@ -19,9 +34,19 @@
     "ast_hash": "a7ef967c9fbd9d27d94309f66ccba82e",
     "semantic_hash": ""
   },
+  "app/scheduler.py": {
+    "mtime": 1794992609.78,
+    "ast_hash": "897697b764b5806ad71d2a2a63fade0c",
+    "semantic_hash": ""
+  },
+  "app/tasks.py": {
+    "mtime": 1794992609.74,
+    "ast_hash": "8ea7bce883793f17698fd9aca43c735e",
+    "semantic_hash": ""
+  },
   "deploy/deploy.sh": {
-    "mtime": 1794730779.47,
-    "ast_hash": "74d78d0f27c0ca727bdfb998885c7ce2",
+    "mtime": 1794992713.4,
+    "ast_hash": "94fe5fbfab1d0475acc8779a6d8d7c38",
     "semantic_hash": ""
   },
   "frontend/main.js": {
@@ -39,19 +64,29 @@
     "ast_hash": "7bea9b6528bb846a66044b896f7dae0e",
     "semantic_hash": ""
   },
+  "tests/conftest.py": {
+    "mtime": 1794992627.95,
+    "ast_hash": "8ea8dd6371bf52b1255dd1d6628290ab",
+    "semantic_hash": ""
+  },
   "tests/test_chat.py": {
-    "mtime": 1794380134.41,
-    "ast_hash": "1f569127afab5767284a6a88c94e8e1b",
+    "mtime": 1794992627.94,
+    "ast_hash": "29e25646ad0f48b9a5ca87c762ec797b",
+    "semantic_hash": ""
+  },
+  "tests/test_tasks.py": {
+    "mtime": 1794992657.68,
+    "ast_hash": "add848ccfad70131ec9258aafc6d1f60",
     "semantic_hash": ""
   },
   ".github/workflows/ci.yml": {
-    "mtime": 1794894949.93,
-    "ast_hash": "abfd6190ead8ccb753e6d273f133c8e6",
+    "mtime": 1794994889.14,
+    "ast_hash": "cc2ba1dba39a557448626e5b477d54f8",
     "semantic_hash": ""
   },
   "CLAUDE.md": {
-    "mtime": 1794380211.89,
-    "ast_hash": "7c4d8bce8e1137bfc631fd33ab34357b",
+    "mtime": 1795057967.34,
+    "ast_hash": "231bc5338acbf2856a924cc2ba5798fb",
     "semantic_hash": ""
   },
   "DESIGN.md": {
@@ -59,14 +94,29 @@
     "ast_hash": "02ceb0b58a44c36c5ce1efd5442e1e6a",
     "semantic_hash": ""
   },
+  "GRAPHIFY.md": {
+    "mtime": 1794982228.5,
+    "ast_hash": "4b686db0ebcfc2de5490d116aa642d67",
+    "semantic_hash": ""
+  },
   "README.md": {
-    "mtime": 1794380211.92,
-    "ast_hash": "4f1db8443d7877f216217d7bc72d7c3d",
+    "mtime": 1795057970.84,
+    "ast_hash": "a313360579337674f86ce9fb301b9530",
+    "semantic_hash": ""
+  },
+  "SCHEDULING_PLAN.md": {
+    "mtime": 1794992713.5,
+    "ast_hash": "254bbe408adbe744c06c3bae797b4526",
+    "semantic_hash": ""
+  },
+  "SCHEDULING_ROADMAP.md": {
+    "mtime": 1794992713.43,
+    "ast_hash": "162612d16c78d203fdc0b83c7ac787eb",
     "semantic_hash": ""
   },
   "docker-compose.yml": {
-    "mtime": 1794894949.89,
-    "ast_hash": "a4d476007d8a4c64cb8ce897fcf42bac",
+    "mtime": 1794992657.7,
+    "ast_hash": "f1d296d4d4115f9e98437f0488b0fdd8",
     "semantic_hash": ""
   },
   "frontend/index.html": {
@@ -75,8 +125,8 @@
     "semantic_hash": ""
   },
   "requirements.txt": {
-    "mtime": 1794316486.7,
-    "ast_hash": "b19a00837b0a167ea86fa3f82a14ebc6",
+    "mtime": 1794992657.69,
+    "ast_hash": "cc6504895d6acedf2be592cea2d907f2",
     "semantic_hash": ""
   }
 }
