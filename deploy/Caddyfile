@@ -1,10 +1,21 @@
 # Caddy reads the domain from the CHAT_DOMAIN env var, e.g. CHAT_DOMAIN=chat-api.okghumo.com
 # DNS for that domain must already point at this server's Elastic IP, or certificate issuance fails.
 {$CHAT_DOMAIN} {
-	# /chat can take minutes (Claude + tool calls); don't cut the upstream early
-	reverse_proxy localhost:8000 {
-		transport http {
-			response_header_timeout 300s
+	# API routes -> FastAPI. Anything not listed here (incl. /docs, /openapi.json) is NOT exposed.
+	@api path /chat /health /credentials /tasks /tasks/* /inbox /inbox/*
+	handle @api {
+		# /chat can take minutes (Claude + tool calls); don't cut the upstream early
+		reverse_proxy localhost:8000 {
+			transport http {
+				response_header_timeout 300s
+			}
 		}
+	}
+
+	# everything else = the static frontend (built into the image at /srv/ui)
+	handle {
+		root * /srv/ui
+		try_files {path} /index.html
+		file_server
 	}
 }

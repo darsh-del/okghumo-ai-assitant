@@ -12,3 +12,5 @@ __pycache__
 .DS_Store
 *.md
 GITHUB_PUSH_INSTRUCTIONS.md
+frontend/node_modules
+frontend/dist
