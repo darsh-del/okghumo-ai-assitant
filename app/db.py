@@ -21,6 +21,7 @@ CREATE TABLE IF NOT EXISTS inbox(
   scheduled_for TEXT NOT NULL, title TEXT NOT NULL, body TEXT NOT NULL,
   read INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL,
   UNIQUE(task_id, scheduled_for));  -- idempotency: a restart can never fire the same run twice
+CREATE TABLE IF NOT EXISTS wa_seen(id TEXT PRIMARY KEY, at REAL NOT NULL);  -- processed WhatsApp message ids
 """
 
 

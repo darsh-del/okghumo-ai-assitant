@@ -19,6 +19,9 @@ ROLE_TOOLS: dict[str, list[str]] = {
     "admin": sorted(READ_ONLY_TOOLS),
     "staff": _ANALYTICS + ["get_bookings", "get_booking_details"],  # no agent balances
     "viewer": _ANALYTICS,
+    # OkGhumo vendor roles (WhatsApp bot): own-client data only, enforced by the token's clientId
+    "vendor": sorted(READ_ONLY_TOOLS),
+    "superVendor": sorted(READ_ONLY_TOOLS),
 }
 
 # Fail at import, not at request time, if anyone adds a non-allowlisted (potentially write) tool.

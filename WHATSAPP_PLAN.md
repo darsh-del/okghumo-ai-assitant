@@ -1,7 +1,7 @@
 # WhatsApp assistant: production workflow (draft v1, 2026-11-20)
 
 Goal: a vendor links their WhatsApp number to their OkGhumo account once, then chats with the bot on WhatsApp.
-**Nothing here is built yet.** Builds on `INTEGRATION_PLAN.md` (isolation layers L1-L8 still apply).
+**Status 2026-11-21: v1 is built** (`app/whatsapp.py`), using OkGhumo's real link API (`/api/users/whatsapp-link`, `/redeem`, `/token`, `/revoke`; OkGhumo owns the phone-to-vendor link, we keep no binding or tokens). Sections 2 and 7 below describe the original design; where they differ, the built flow is: bot sends `connectUrl` -> vendor logs in on OkGhumo's page -> page shows `LINK-<code>` + Open WhatsApp button -> vendor taps Send -> bot redeems with the webhook's sender phone. Still open: HTTPS domain, queue/Redis, scheduled WhatsApp reports. Builds on `INTEGRATION_PLAN.md` (isolation layers L1-L8 still apply).
 
 ## 1. The idea in one paragraph
 WhatsApp tells us, and Meta signs it, **which phone number sent a message**. OkGhumo's login tells us **which

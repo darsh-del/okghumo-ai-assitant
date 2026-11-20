@@ -2,7 +2,7 @@
 # DNS for that domain must already point at this server's Elastic IP, or certificate issuance fails.
 {$CHAT_DOMAIN} {
 	# API routes -> FastAPI. Anything not listed here (incl. /docs, /openapi.json) is NOT exposed.
-	@api path /chat /health /credentials /tasks /tasks/* /inbox /inbox/*
+	@api path /chat /health /credentials /tasks /tasks/* /inbox /inbox/* /whatsapp/webhook
 	handle @api {
 		# /chat can take minutes (Claude + tool calls); don't cut the upstream early
 		reverse_proxy localhost:8000 {
