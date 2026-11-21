@@ -38,9 +38,11 @@ def test_bad_schedules_rejected():
 
 
 def test_task_limit():
-    for _ in range(10):
-        assert c.post("/tasks", json=TASK, headers=h("cap")).status_code == 201
-    assert c.post("/tasks", json=TASK, headers=h("cap")).status_code == 409
+    for i in range(10):
+        assert c.post("/tasks", json={**TASK, "message": f"m{i}"}, headers=h("cap")).status_code == 201
+    assert c.post("/tasks", json={**TASK, "message": "m11"}, headers=h("cap")).status_code == 409
+    assert c.post("/tasks", json=TASK, headers=h("dup")).status_code == 201  # exact duplicate refused
+    assert c.post("/tasks", json=TASK, headers=h("dup")).status_code == 409
 
 
 def test_vendor_isolation():

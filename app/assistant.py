@@ -1,9 +1,11 @@
-"""The one place that calls the model. Shared by POST /chat and the WhatsApp worker."""
+"""The one place that calls the model. Shared by POST /chat, the WhatsApp worker and scheduled reports."""
 import os
 
 import anthropic
 
 from app.rbac import mcp_toolset
+
+MAX_STEPS = 4  # model <-> our-own-tool round trips per request (MCP tool calls run server-side, not counted)
 
 SYSTEM = (
     "You are the Okghumo assistant. Use the Okghumo tools as your primary source of data; "
@@ -22,22 +24,44 @@ def get_client() -> anthropic.Anthropic:
     return anthropic.Anthropic()  # reads ANTHROPIC_API_KEY
 
 
-def ask(client, role: str | None, mcp_access_token: str, messages: list[dict], system: str = SYSTEM) -> dict:
-    """KeyError if the role is unknown (deny by default). The caller supplies THIS vendor's token."""
+def _dump(b) -> dict:
+    return b.model_dump(exclude_none=True) if hasattr(b, "model_dump") else dict(vars(b))
+
+
+def ask(client, role: str | None, mcp_access_token: str, messages: list[dict], system: str = SYSTEM,
+        extra=None, model: str | None = None) -> dict:
+    """KeyError if the role is unknown (deny by default). The caller supplies THIS vendor's token.
+
+    `extra` (optional) adds app-side function tools: an object with `.tools` (schemas) and `.call(name, input) -> str`.
+    Those tools run in OUR process, so they must only ever propose or read, never commit (see app/schedules.py).
+    """
     toolset = mcp_toolset(role)
     server = {"type": "url", "name": "okghumo", "url": os.environ["OKGHUMO_MCP_URL"],
               "authorization_token": mcp_access_token}
-    r = client.beta.messages.create(
-        model=os.environ.get("CHAT_MODEL", "claude-opus-5-5"),
-        max_tokens=16000,
-        betas=["mcp-client-2025-11-20"],
-        system=system,
-        messages=messages,
-        mcp_servers=[server],
-        tools=[toolset],
-    )
+    tools = [toolset] + (extra.tools if extra else [])
+    msgs, used = list(messages), []
+    for _ in range(MAX_STEPS):
+        r = client.beta.messages.create(
+            model=model or os.environ.get("CHAT_MODEL", "claude-opus-5-5"),
+            max_tokens=16000,
+            betas=["mcp-client-2025-11-20"],
+            system=system,
+            messages=msgs,
+            mcp_servers=[server],
+            tools=tools,
+        )
+        used += [b.name for b in r.content if b.type == "mcp_tool_use"]
+        calls = [b for b in r.content if b.type == "tool_use"]
+        if not (extra and calls):
+            break
+        results = []
+        for b in calls:
+            out = extra.call(b.name, b.input)
+            results.append({"type": "tool_result", "tool_use_id": b.id, "content": out,
+                            **({"is_error": True} if out.startswith("error:") else {})})
+        msgs += [{"role": "assistant", "content": [_dump(b) for b in r.content]}, {"role": "user", "content": results}]
     return {
         "reply": "".join(b.text for b in r.content if b.type == "text"),
-        "tools_used": [b.name for b in r.content if b.type == "mcp_tool_use"],
+        "tools_used": used,
         "stop_reason": r.stop_reason,
     }

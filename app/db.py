@@ -22,7 +22,16 @@ CREATE TABLE IF NOT EXISTS inbox(
   read INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL,
   UNIQUE(task_id, scheduled_for));  -- idempotency: a restart can never fire the same run twice
 CREATE TABLE IF NOT EXISTS wa_seen(id TEXT PRIMARY KEY, at REAL NOT NULL);  -- processed WhatsApp message ids
+CREATE TABLE IF NOT EXISTS proposals(  -- chat-proposed schedule awaiting the vendor's YES (one per vendor)
+  vendor_id TEXT PRIMARY KEY, payload TEXT NOT NULL, created_at REAL NOT NULL);
 """
+
+# columns added after first release: CREATE IF NOT EXISTS can't alter an existing prod table
+MIGRATIONS = [
+    ("tasks", "kind", "TEXT NOT NULL DEFAULT 'reminder'"),  # reminder | report (message = the question to answer)
+    ("tasks", "role", "TEXT"),                               # role at creation, re-checked on every run
+    ("tasks", "fails", "INTEGER NOT NULL DEFAULT 0"),        # consecutive failed runs; auto-pause at 5
+]
 
 
 def connect() -> sqlite3.Connection:
@@ -32,6 +41,12 @@ def connect() -> sqlite3.Connection:
     c.row_factory = sqlite3.Row
     c.execute("PRAGMA journal_mode=WAL")
     c.executescript(SCHEMA)
+    for table, col, ddl in MIGRATIONS:
+        if col not in {r["name"] for r in c.execute(f"PRAGMA table_info({table})")}:
+            try:
+                c.execute(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}")
+            except sqlite3.OperationalError:  # API and scheduler raced to add it
+                pass
     return c
 
 

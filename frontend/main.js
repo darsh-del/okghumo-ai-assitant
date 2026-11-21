@@ -8,7 +8,7 @@ const store = { // localStorage can throw (private mode); never let that break t
 let messages = [] // stateless API: send full history each time
 let busy = false
 
-const SUGGESTIONS = ['How were my sales this month?', 'Who owes me money?', 'Show bookings by source (online, agent, offline)']
+const SUGGESTIONS = ['How were my sales this month?', 'Who owes me money?', 'Show bookings by source (online, agent, offline)', 'Send me a daily sales summary at 8 am']
 const ERRORS = {
   401: 'Your access token is missing, invalid or expired. Paste a fresh one in Settings.',
   403: "This account's role is not allowed to use the assistant.",

@@ -10,7 +10,7 @@ read-only; scheduled runs use the same read-only allowlist and never a write too
 | 0 Per-vendor identity (our side) | **Built** — vendor-keyed credentials + token cache |
 | 0b OkGhumo-issued delegated credential + validated identity | **Not built — needs OkGhumo backend** (below) |
 | 1 Scheduled reminders + inbox | **Built** — plain-text reminders, no data, no model call |
-| 2 Scheduled reports (in-app) | Not built — spec below |
+| 2 Scheduled reports (in-app) | **Built (2026-11-21, via chat)** — vendor asks in `/chat`, model proposes, vendor replies YES, code creates (`app/schedules.py`); `app/runner.py` runs it. Uses the stored credential (Phase 0b still pending). Not built: `/tasks/{id}/run`, `task_runs`, retry/backoff, per-vendor budgets, WhatsApp channel |
 | 3 Email delivery | Not built |
 | 4 WhatsApp delivery | Not built |
 | 5 Hardening | Not built |

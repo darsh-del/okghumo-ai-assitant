@@ -15,7 +15,9 @@ from app.db import run
 
 router = APIRouter()
 MAX_TASKS = 10  # per vendor, any status
-MIN_GAP_S = 3600  # no schedule may fire more than once an hour
+MIN_GAP_S = 3600  # no reminder may fire more than once an hour
+REPORT_GAP_S = 20 * 3600  # reports cost a model call: at most daily (20h tolerates DST shifts)
+MAX_REPORTS = 5  # per vendor
 
 
 def now() -> datetime:
@@ -31,18 +33,18 @@ def next_run(cron: str, tz: str, after: datetime) -> datetime:
     return croniter(cron, after.astimezone(ZoneInfo(tz))).get_next(datetime).astimezone(timezone.utc)
 
 
-def validate(cron: str, tz: str) -> None:
+def validate(cron: str, tz: str, min_gap: int = MIN_GAP_S) -> None:
     try:
         ZoneInfo(tz)
-    except (ZoneInfoNotFoundError, ValueError):
+    except (ZoneInfoNotFoundError, ValueError, OSError):  # OSError: e.g. "America" is a directory
         raise HTTPException(422, "unknown timezone")
     if not croniter.is_valid(cron) or len(cron.split()) != 5:
         raise HTTPException(422, "cron must be 5 fields, e.g. '0 8 * * *'")
     t, prev = now(), None
     for _ in range(6):  # ponytail: samples 6 firings; a pathological cron could dodge it, upgrade = check all gaps in a month
         t = next_run(cron, tz, t)
-        if prev and (t - prev).total_seconds() < MIN_GAP_S:
-            raise HTTPException(422, "schedule may not fire more than once an hour")
+        if prev and (t - prev).total_seconds() < min_gap:
+            raise HTTPException(422, "schedule fires too often")
         prev = t
 
 
@@ -64,18 +66,33 @@ def _task(vendor: str, task_id: int):
     return rows[0]
 
 
+def check_task(v: str, message: str, cron: str, tz: str, kind: str) -> None:
+    """Every rule a new task must satisfy. HTTPException on violation (also used to pre-check chat proposals)."""
+    report = kind == "report"
+    validate(cron, tz, REPORT_GAP_S if report else MIN_GAP_S)
+    mine = run("SELECT kind, cron, message FROM tasks WHERE vendor_id=?", (v,))
+    if len(mine) >= MAX_TASKS:
+        raise HTTPException(409, f"max {MAX_TASKS} tasks")
+    if report and sum(r["kind"] == "report" for r in mine) >= MAX_REPORTS:
+        raise HTTPException(409, f"max {MAX_REPORTS} scheduled reports")
+    if any(r["cron"] == cron and r["message"] == message and r["kind"] == kind for r in mine):
+        raise HTTPException(409, "already scheduled")
+
+
+def add_task(v: str, name: str, message: str, cron: str, tz: str, kind: str = "reminder", role: str | None = None) -> dict:
+    """The one place a task row is created (API and chat-confirmed)."""
+    check_task(v, message, cron, tz, kind)
+    n = now()
+    return dict(run(
+        "INSERT INTO tasks(vendor_id,name,message,cron,tz,kind,role,next_run_at,created_at) "
+        "VALUES(?,?,?,?,?,?,?,?,?) RETURNING *",
+        (v, name, message, cron, tz, kind, role, iso(next_run(cron, tz, n)), iso(n)),
+    )[0])
+
+
 @router.post("/tasks", status_code=201)
 def create_task(body: TaskIn, claims: dict = Depends(current_user)):
-    v = claims["sub"]
-    validate(body.cron, body.tz)
-    if run("SELECT COUNT(*) AS n FROM tasks WHERE vendor_id=?", (v,))[0]["n"] >= MAX_TASKS:
-        raise HTTPException(409, f"max {MAX_TASKS} tasks")
-    n = now()
-    run(
-        "INSERT INTO tasks(vendor_id,name,message,cron,tz,next_run_at,created_at) VALUES(?,?,?,?,?,?,?)",
-        (v, body.name, body.message, body.cron, body.tz, iso(next_run(body.cron, body.tz, n)), iso(n)),
-    )
-    return dict(run("SELECT * FROM tasks WHERE vendor_id=? ORDER BY id DESC LIMIT 1", (v,))[0])
+    return add_task(claims["sub"], body.name, body.message, body.cron, body.tz)  # API makes reminders only
 
 
 @router.get("/tasks")
@@ -87,7 +104,7 @@ def list_tasks(claims: dict = Depends(current_user)):
 def patch_task(task_id: int, body: TaskPatch, claims: dict = Depends(current_user)):
     t = _task(claims["sub"], task_id)
     # resuming recomputes next_run_at so a long pause doesn't fire stale
-    run("UPDATE tasks SET status=?, next_run_at=? WHERE id=?",
+    run("UPDATE tasks SET status=?, fails=0, next_run_at=? WHERE id=?",
         (body.status, iso(next_run(t["cron"], t["tz"], now())), task_id))
     return dict(_task(claims["sub"], task_id))
 

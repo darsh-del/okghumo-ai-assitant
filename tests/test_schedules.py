@@ -1,0 +1,359 @@
+"""Chat-driven scheduling: the model only proposes; code creates after the vendor's own YES."""
+import os
+import sqlite3
+import tempfile
+import time
+from datetime import datetime, timedelta
+from types import SimpleNamespace as NS
+
+import jwt
+import pytest
+from fastapi.testclient import TestClient
+
+os.environ.update(JWT_SECRET="s", OKGHUMO_MCP_URL="https://mcp.test/mcp")
+import app.main as m  # noqa: E402
+import app.runner as runner  # noqa: E402
+from app import assistant, db, scheduler, schedules  # noqa: E402
+from app.credentials import NoCredential  # noqa: E402
+from app.db import run  # noqa: E402
+from app.main import app, get_client  # noqa: E402
+from app.rbac import READ_ONLY_TOOLS  # noqa: E402
+
+c = TestClient(app)
+GOOD = {"kind": "report", "name": "Daily sales", "text": "Sales and bookings for yesterday", "frequency": "daily", "time": "08:00"}
+
+
+class Fake:
+    """Scripted model: each create() pops the next list of content blocks."""
+    def __init__(self, *script):
+        self.script, self.calls = list(script), []
+        self.beta = NS(messages=NS(create=self._create))
+
+    def _create(self, **kw):
+        self.calls.append(kw)
+        blocks = self.script.pop(0) if self.script else [text("ok")]
+        return NS(stop_reason="tool_use" if any(b.type == "tool_use" for b in blocks) else "end_turn", content=blocks)
+
+
+def text(t): return NS(type="text", text=t)
+def tool(name, inp, i="t1"): return NS(type="tool_use", id=i, name=name, input=inp)
+def propose(**kw): return tool("propose_schedule", {**GOOD, **kw})
+def user(t): return {"role": "user", "content": t}
+def bot(t): return {"role": "assistant", "content": t}
+
+
+@pytest.fixture(autouse=True)
+def clean(monkeypatch):
+    for t in ("tasks", "inbox", "proposals"):
+        run(f"DELETE FROM {t}")
+    monkeypatch.setattr(m, "mcp_token", lambda vid: "mcp-" + vid)
+    monkeypatch.delenv("SCHEDULING_VIA_CHAT", raising=False)
+    yield
+    app.dependency_overrides.clear()
+
+
+def chat(vendor, messages, fake=None, role="vendor"):
+    fake = fake or Fake()
+    app.dependency_overrides[get_client] = lambda: fake
+    h = {"Authorization": "Bearer " + jwt.encode({"sub": vendor, "role": role}, "s", algorithm="HS256")}
+    r = c.post("/chat", json={"messages": messages}, headers=h)
+    assert r.status_code == 200, r.text
+    return r.json(), fake
+
+
+def tasks_of(v): return run("SELECT * FROM tasks WHERE vendor_id=?", (v,))
+def proposed(v, fake=None, **kw):
+    """Run the propose turn; returns the assistant reply to feed back as history."""
+    out, _ = chat(v, [user("send me daily sales")], fake or Fake([propose(**kw)], [text("Here's the plan:")]))
+    return out["reply"]
+
+
+# ---------- propose -> confirm happy path ----------
+def test_propose_creates_nothing_then_yes_creates():
+    reply = proposed("A")
+    assert schedules.MARK in reply and "Daily sales" in reply and "08:00" in reply and "Asia/Kolkata" in reply
+    assert tasks_of("A") == []  # a proposal alone never creates a task
+    out, f = chat("A", [user("send me daily sales"), bot(reply), user("Yes")])
+    assert f.calls == []  # confirmation handled in code: zero model calls
+    (t,) = tasks_of("A")
+    assert (t["kind"], t["role"], t["cron"], t["tz"], t["status"]) == ("report", "vendor", "0 8 * * *", "Asia/Kolkata", "active")
+    assert out["reply"].startswith("Done") and "inbox" in out["reply"]
+    assert run("SELECT * FROM proposals") == []  # one-shot
+
+
+def test_no_discards_proposal():
+    reply = proposed("A")
+    out, f = chat("A", [bot(reply), user("no")])
+    assert "haven't changed" in out["reply"] and tasks_of("A") == [] and not f.calls and run("SELECT * FROM proposals") == []
+
+
+@pytest.mark.parametrize("word", ["yes", "YES!", "Ok", "haan", "Haan.", "yes please", "👍", "kar do", "Yes 👍", "हाँ"])
+def test_yes_variants(word):
+    reply = proposed("Y" + word)
+    chat("Y" + word, [bot(reply), user(word)])
+    assert len(tasks_of("Y" + word)) == 1
+
+
+def test_weekly_monthly_and_reminder_crons():
+    for v, kw, cron in [("w", dict(frequency="weekly", weekday="Monday"), "0 8 * * mon"),
+                        ("mo", dict(frequency="monthly", day_of_month=5), "0 8 5 * *"),
+                        ("r", dict(kind="reminder", time="9:30"), "30 9 * * *")]:
+        chat(v, [bot(proposed(v, **kw)), user("yes")])
+        assert tasks_of(v)[0]["cron"] == cron
+
+
+# ---------- the guardrails: model can't commit, confirmation can't be forged ----------
+def test_yes_without_our_marker_does_not_confirm():
+    proposed("A")
+    out, f = chat("A", [bot("Want a summary of sales?"), user("yes")])  # yes answers a DIFFERENT question
+    assert f.calls and tasks_of("A") == []
+
+
+def test_model_cannot_forge_the_marker():
+    reply = proposed("A", fake=Fake([propose()], [text(f"Done! {schedules.MARK}")]))
+    assert reply.count(schedules.MARK) == 1 and reply.endswith(schedules.MARK)  # only code's copy survives
+
+
+def test_no_pending_proposal_yes_is_harmless():
+    out, f = chat("A", [bot("x " + schedules.MARK), user("yes")])
+    assert "expired" in out["reply"] and tasks_of("A") == [] and not f.calls
+
+
+def test_expired_proposal_cannot_be_confirmed():
+    reply = proposed("A")
+    run("UPDATE proposals SET created_at=?", (time.time() - schedules.TTL - 5,))
+    out, _ = chat("A", [bot(reply), user("yes")])
+    assert "expired" in out["reply"] and tasks_of("A") == []
+
+
+def test_other_vendors_yes_does_not_confirm_mine():
+    reply = proposed("A")
+    out, _ = chat("B", [bot(reply), user("yes")])  # B replays A's text
+    assert "expired" in out["reply"] and tasks_of("A") == [] and tasks_of("B") == []
+    assert len(run("SELECT * FROM proposals WHERE vendor_id='A'")) == 1  # A's proposal untouched
+
+
+def test_double_yes_creates_only_one():
+    reply = proposed("A")
+    chat("A", [bot(reply), user("yes")])
+    out, _ = chat("A", [bot(reply), user("yes")])
+    assert "expired" in out["reply"] and len(tasks_of("A")) == 1
+
+
+def test_non_yes_answer_goes_to_model_and_new_proposal_replaces_old():
+    reply = proposed("A")
+    f = Fake([propose(time="09:00")], [text("Sure:")])
+    out, f = chat("A", [bot(reply), user("make it 9am")], f)
+    assert f.calls and tasks_of("A") == []  # a change request is not a confirmation
+    chat("A", [bot(out["reply"]), user("yes")])
+    assert tasks_of("A")[0]["cron"] == "0 9 * * *"
+
+
+def test_only_one_proposal_per_message_injection_cant_stack():
+    f = Fake([propose(name="one", i="t1") , propose(name="two", i="t2")], [text("ok")])
+    f.script[0][1].id = "t2"
+    chat("A", [user("hi")], f)
+    assert "one" in run("SELECT payload FROM proposals")[0]["payload"] and len(run("SELECT * FROM proposals")) == 1
+    sent = f.calls[1]["messages"][-1]["content"]  # tool results fed back
+    assert sent[1]["is_error"] and "one proposal" in sent[1]["content"]
+
+
+def test_tools_offered_are_propose_or_read_only_and_mcp_stays_read_only():
+    out, f = chat("A", [user("hi")])
+    tools = f.calls[0]["tools"]
+    assert set(tools[0]["configs"]) <= READ_ONLY_TOOLS and tools[0]["default_config"] == {"enabled": False}
+    assert [t["name"] for t in tools[1:]] == ["propose_schedule", "propose_cancel", "list_schedules"]
+    assert "NOT scheduled" in schedules.Scheduling("A", "vendor").call("propose_schedule", GOOD)
+
+
+def test_kill_switch_removes_tools_and_confirmation(monkeypatch):
+    reply = proposed("A")
+    monkeypatch.setenv("SCHEDULING_VIA_CHAT", "0")
+    out, f = chat("A", [bot(reply), user("yes")])
+    assert len(f.calls) == 1 and f.calls[0]["tools"][1:] == [] and tasks_of("A") == []
+
+
+def test_unknown_role_gets_no_scheduling():
+    app.dependency_overrides[get_client] = lambda: Fake()
+    h = {"Authorization": "Bearer " + jwt.encode({"sub": "A", "role": "hacker"}, "s", algorithm="HS256")}
+    assert c.post("/chat", json={"messages": [user("hi")]}, headers=h).status_code == 403
+
+
+def test_tool_loop_is_capped():
+    f = Fake(*[[tool("list_schedules", {}, f"t{i}")] for i in range(20)])
+    chat("A", [user("hi")], f)
+    assert len(f.calls) == assistant.MAX_STEPS
+
+
+# ---------- bad input from the model never reaches the DB ----------
+@pytest.mark.parametrize("bad", [
+    dict(time="25:00"), dict(time="8am"), dict(time=""), dict(frequency="hourly"), dict(frequency="weekly"),
+    dict(frequency="weekly", weekday="funday"), dict(frequency="monthly"), dict(frequency="monthly", day_of_month=31),
+    dict(frequency="monthly", day_of_month=True), dict(frequency="monthly", day_of_month="5"), dict(tz="Mars/Base"),
+    dict(tz="America"), dict(tz="../etc/passwd"), dict(kind="delete_everything"), dict(name=""), dict(name="x" * 81),
+    dict(text=""), dict(text="x" * 501), dict(time="08:00; DROP TABLE tasks"),
+])
+def test_invalid_proposals_rejected(bad):
+    s = schedules.Scheduling("A", "vendor")
+    assert s.call("propose_schedule", {**GOOD, **bad}).startswith("error:") and s.note is None
+    assert run("SELECT * FROM proposals") == []
+
+
+def test_garbage_tool_input_and_unknown_tool():
+    s = schedules.Scheduling("A", "vendor")
+    for inp in (None, "str", [], {}):
+        assert s.call("propose_schedule", inp).startswith("error:")
+        assert s.call("propose_cancel", inp).startswith("error:")
+    assert s.call("delete_all_tasks", {}).startswith("error:")
+    assert s.call("authenticate", {}).startswith("error:")
+
+
+def test_limits_and_duplicates():
+    for i in range(5):
+        chat("L", [bot(proposed("L", text=f"q{i}")), user("yes")])
+    s = schedules.Scheduling("L", "vendor")
+    assert "scheduled reports" in s.call("propose_schedule", {**GOOD, "text": "q99"})  # max 5 reports
+    chat("L", [bot(proposed("L", kind="reminder", text="r")), user("yes")])  # reminders still fine
+    assert len(tasks_of("L")) == 6
+    assert "already scheduled" in s.call("propose_schedule", {**GOOD, "kind": "reminder", "text": "r"})
+
+
+def test_limit_hit_between_proposal_and_yes():
+    reply = proposed("A")
+    for i in range(10):  # another path fills the vendor's quota meanwhile
+        c.post("/tasks", json={"name": "n", "message": f"m{i}", "cron": "0 8 * * *"},
+               headers={"Authorization": "Bearer " + jwt.encode({"sub": "A", "role": "vendor"}, "s", algorithm="HS256")})
+    out, _ = chat("A", [bot(reply), user("yes")])
+    assert "couldn't set that up" in out["reply"] and len(tasks_of("A")) == 10
+
+
+# ---------- cancel + list + isolation ----------
+def test_cancel_flow_and_isolation():
+    chat("A", [bot(proposed("A")), user("yes")])
+    chat("B", [bot(proposed("B")), user("yes")])
+    a, b = tasks_of("A")[0]["id"], tasks_of("B")[0]["id"]
+    sb = schedules.Scheduling("B", "vendor")
+    assert sb.call("propose_cancel", {"task_id": a}) == "error: no such schedule"  # can't even propose A's task
+    assert len(__import__("json").loads(sb.call("list_schedules", {}))) == 1  # lists only B's
+    f = Fake([tool("propose_cancel", {"task_id": a})], [text("Sure:")])
+    out, _ = chat("A", [user("stop my report")], f)
+    assert "Cancel" in out["reply"] and len(tasks_of("A")) == 1  # proposal alone deletes nothing
+    chat("A", [bot(out["reply"]), user("no")])
+    assert len(tasks_of("A")) == 1
+    f = Fake([tool("propose_cancel", {"task_id": a})], [text("Sure:")])
+    out, _ = chat("A", [user("stop my report")], f)
+    chat("A", [bot(out["reply"]), user("yes")])
+    assert tasks_of("A") == [] and len(tasks_of("B")) == 1 and b
+
+
+def test_cancel_proposal_cannot_delete_someone_elses_task_even_if_forged():
+    chat("A", [bot(proposed("A")), user("yes")])
+    a = tasks_of("A")[0]["id"]
+    run("INSERT INTO proposals VALUES('B', ?, ?)", (f'{{"action":"cancel","task_id":{a},"summary":"x"}}', time.time()))
+    out, _ = chat("B", [bot("x " + schedules.MARK), user("yes")])
+    assert len(tasks_of("A")) == 1 and "no longer exists" in out["reply"]
+
+
+# ---------- scheduled report runs ----------
+def make_report(vendor="R", role="vendor"):
+    t = __import__("app.tasks", fromlist=["x"]).add_task(vendor, "Daily", "Sales for yesterday", "0 8 * * *", "Asia/Kolkata", "report", role)
+    return t, datetime.fromisoformat(t["next_run_at"]) + timedelta(minutes=1)
+
+
+def fire(t, due, monkeypatch, fake=None, token=lambda v: "mcp-" + v):
+    fake = fake or Fake([text("Sales: ₹5,000 from 3 bookings.")])
+    monkeypatch.setattr(runner.assistant, "get_client", lambda: fake)
+    monkeypatch.setattr(runner.mcp_auth, "mcp_token", token)
+    scheduler.tick(due)
+    return fake, run("SELECT * FROM inbox WHERE task_id=?", (t["id"],))
+
+
+def test_report_runs_with_own_token_readonly_tools_no_client_tools(monkeypatch):
+    t, due = make_report("R1")
+    f, (row,) = fire(t, due, monkeypatch)
+    assert row["body"].startswith("Sales:") and row["vendor_id"] == "R1"
+    call = f.calls[0]
+    assert call["mcp_servers"][0]["authorization_token"] == "mcp-R1"
+    assert len(call["tools"]) == 1 and set(call["tools"][0]["configs"]) <= READ_ONLY_TOOLS  # no propose tools in a run
+    assert "SCHEDULED report" in call["system"] and str(datetime.now().year) in call["system"]
+    assert run("SELECT fails FROM tasks WHERE id=?", (t["id"],))[0]["fails"] == 0
+
+
+def test_two_vendors_reports_never_share_tokens(monkeypatch):
+    t1, due1 = make_report("V1"); t2, due2 = make_report("V2")
+    f = Fake([text("a")], [text("b")])
+    monkeypatch.setattr(runner.assistant, "get_client", lambda: f)
+    monkeypatch.setattr(runner.mcp_auth, "mcp_token", lambda v: "mcp-" + v)
+    scheduler.tick(max(due1, due2))
+    assert sorted(x["mcp_servers"][0]["authorization_token"] for x in f.calls) == ["mcp-V1", "mcp-V2"]
+
+
+def test_missing_credential_no_model_call_and_friendly_notice(monkeypatch):
+    t, due = make_report("NC")
+    def nocred(v): raise NoCredential(v)
+    f, (row,) = fire(t, due, monkeypatch, token=nocred)
+    assert f.calls == [] and "reconnect" in row["body"].lower()
+    assert run("SELECT fails FROM tasks WHERE id=?", (t["id"],))[0]["fails"] == 1
+
+
+def test_unknown_role_no_token_no_model_call(monkeypatch):
+    t, due = make_report("UR", role="hacker")
+    f, (row,) = fire(t, due, monkeypatch)
+    assert f.calls == [] and "role" in row["body"]
+
+
+def test_model_crash_empty_answer_and_long_answer(monkeypatch):
+    t, due = make_report("CR")
+    class Boom:
+        beta = NS(messages=NS(create=lambda **kw: (_ for _ in ()).throw(RuntimeError("secret detail"))))
+    f, (row,) = fire(t, due, monkeypatch, fake=Boom())
+    assert "secret" not in row["body"] and "couldn't" in row["body"]
+    t2, due2 = make_report("EM")
+    f, (row,) = fire(t2, due2, monkeypatch, fake=Fake([text("   ")]))
+    assert "couldn't" in row["body"]
+    t3, due3 = make_report("LG")
+    f, (row,) = fire(t3, due3, monkeypatch, fake=Fake([text("x" * 9000)]))
+    assert len(row["body"]) == runner.MAX_BODY
+
+
+def test_five_failures_pause_and_resume_resets(monkeypatch):
+    t, _ = make_report("PA")
+    def nocred(v): raise NoCredential(v)
+    monkeypatch.setattr(runner.mcp_auth, "mcp_token", nocred)
+    for i in range(runner.MAX_FAILS):
+        row = run("SELECT * FROM tasks WHERE id=?", (t["id"],))[0]
+        iid = run("INSERT INTO inbox(vendor_id,task_id,scheduled_for,title,body,created_at) VALUES('PA',?,?, 'x','p','n') RETURNING id", (t["id"], str(i)))[0]["id"]
+        runner.run_report(iid, dict(row))
+    row = run("SELECT * FROM tasks WHERE id=?", (t["id"],))[0]
+    assert row["status"] == "paused" and row["fails"] == 5
+    hdr = {"Authorization": "Bearer " + jwt.encode({"sub": "PA", "role": "vendor"}, "s", algorithm="HS256")}
+    assert c.patch(f"/tasks/{t['id']}", json={"status": "active"}, headers=hdr).json()["fails"] == 0
+
+
+def test_report_slot_fires_once_even_if_scheduler_restarts(monkeypatch):
+    t, due = make_report("ID")
+    f, rows = fire(t, due, monkeypatch)
+    run("UPDATE tasks SET next_run_at=? WHERE id=?", (t["next_run_at"], t["id"]))  # simulate crash before update
+    fire(t, due, monkeypatch, fake=f)
+    assert len(rows) == 1 and len(run("SELECT * FROM inbox WHERE task_id=?", (t["id"],))) == 1 and len(f.calls) == 1
+
+
+def test_reminders_still_plain_text_no_model(monkeypatch):
+    t = __import__("app.tasks", fromlist=["x"]).add_task("RM", "Pay", "Pay staff", "0 8 * * *", "Asia/Kolkata")
+    f, (row,) = fire(t, datetime.fromisoformat(t["next_run_at"]) + timedelta(minutes=1), monkeypatch)
+    assert row["body"] == "Pay staff" and f.calls == []
+
+
+# ---------- migration of an existing prod DB ----------
+def test_old_tasks_table_is_migrated(monkeypatch):
+    p = os.path.join(tempfile.mkdtemp(), "old.db")
+    old = sqlite3.connect(p)
+    old.execute("CREATE TABLE tasks(id INTEGER PRIMARY KEY AUTOINCREMENT, vendor_id TEXT NOT NULL, name TEXT NOT NULL, "
+                "message TEXT NOT NULL, cron TEXT NOT NULL, tz TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'active', "
+                "next_run_at TEXT NOT NULL, last_run_at TEXT, created_at TEXT NOT NULL)")
+    old.execute("INSERT INTO tasks(vendor_id,name,message,cron,tz,next_run_at,created_at) VALUES('v','n','m','0 8 * * *','UTC','x','x')")
+    old.commit(); old.close()
+    monkeypatch.setenv("DB_PATH", p)
+    row = run("SELECT * FROM tasks")[0]
+    assert (row["kind"], row["role"], row["fails"]) == ("reminder", None, 0)
+    run("SELECT * FROM tasks")  # second connect is a no-op
