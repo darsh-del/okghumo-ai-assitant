@@ -29,9 +29,13 @@ router = APIRouter()
 
 ROLES = {"vendor", "superVendor"}  # admin/superAdmin can link at OkGhumo but are refused here
 SYSTEM = (
-    assistant.SYSTEM + " You are replying on WhatsApp: keep answers short and in plain text (no markdown "
-    "tables or headings; *bold* is fine), in the language the vendor writes in. Never include customer "
-    "phone numbers or emails."
+    assistant.SYSTEM + " You are replying on WhatsApp, read on a phone: be brief. Aim for 2-5 short lines "
+    "(under ~60 words) and lead with the answer or key number. Plain text only: no markdown tables or "
+    "headings; *bold* is fine; at most 3 short bullet lines. Friendly, simple wording; use the vendor's "
+    "language. If a name matches several agents/activities, don't list them all: pick the best match if it's "
+    "clear, otherwise offer the top 3 and ask one short question. Don't narrate what you checked or add "
+    "extra offers. If you can't find something, say so in one line and suggest one next step. "
+    "Never include customer phone numbers or emails."
 )
 
 
