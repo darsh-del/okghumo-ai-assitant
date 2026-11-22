@@ -21,8 +21,8 @@ import httpx
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from fastapi.responses import PlainTextResponse
 
-from app import assistant
-from app.db import connect
+from app import assistant, schedules
+from app.db import connect, run
 
 log = logging.getLogger("whatsapp")
 router = APIRouter()
@@ -151,11 +151,60 @@ def _answer(phone: str, text: str, wamid: str) -> None:
         _graph({"status": "read", "message_id": wamid, "typing_indicator": {"type": "text"}})
     except Exception:
         pass  # cosmetic
-    msgs = _messages(phone) + [{"role": "user", "content": text}]
-    out = assistant.ask(assistant.get_client(), t["role"], t["mcpAccessToken"], msgs, SYSTEM)
-    reply = out["reply"] or "Sorry, I couldn't find an answer to that."
+    vendor, msgs = "wa:" + phone, _messages(phone) + [{"role": "user", "content": text}]  # own namespace per phone
+    done = schedules.intercept(vendor, t["role"], msgs, where="here on WhatsApp")  # YES/NO to OUR prompt: code, no model
+    if done is not None:
+        _remember(phone, msgs + [{"role": "assistant", "content": done}])
+        return send(phone, done)
+    if flush(phone) and len(text) <= 10:  # a ping that only opened the 24h window: reports are enough
+        return
+    sched = schedules.for_vendor(vendor, t["role"])
+    out = assistant.ask(assistant.get_client(), t["role"], t["mcpAccessToken"], msgs,
+                        SYSTEM + (schedules.SCHED_SYSTEM + schedules.WA_SCHED if sched else ""), extra=sched)
+    reply = sched.finish(out["reply"]) if sched else out["reply"]
+    reply = reply or "Sorry, I couldn't find an answer to that."
     _remember(phone, msgs + [{"role": "assistant", "content": reply}])
     send(phone, reply)
+
+
+# ---- scheduled delivery ----
+def deliver(inbox_id: int, vendor: str, title: str, body: str) -> None:
+    """Send one inbox row to its WhatsApp owner. Free text only works inside Meta's 24h window; outside it we send
+    an approved template (WHATSAPP_REPORT_TEMPLATE, one text variable = the title) and keep the row unsent, so
+    flush() delivers it when the vendor next writes. Never raises."""
+    if not vendor.startswith("wa:"):
+        return
+    phone = vendor[3:]
+    try:
+        send(phone, f"*{title}*\n{body}")
+        run("UPDATE inbox SET sent=1 WHERE id=? AND vendor_id=?", (inbox_id, vendor))
+    except httpx.HTTPStatusError:  # window closed (or Meta refused)
+        tpl = os.environ.get("WHATSAPP_REPORT_TEMPLATE")
+        if tpl:
+            try:
+                _graph({"to": phone, "type": "template", "template": {
+                    "name": tpl, "language": {"code": os.environ.get("WHATSAPP_TEMPLATE_LANG", "en")},
+                    "components": [{"type": "body", "parameters": [{"type": "text", "text": " ".join(title.split())[:60]}]}]}})
+            except Exception as e:
+                log.error("template send failed: %s", type(e).__name__)
+    except Exception as e:
+        log.error("scheduled delivery failed: %s", type(e).__name__)
+
+
+def flush(phone: str) -> int:
+    """Vendor just wrote (24h window open): send the latest undelivered scheduled items, drop older ones."""
+    v, n = "wa:" + phone, 0
+    rows = run("SELECT id,title,body FROM inbox WHERE vendor_id=? AND sent=0 AND body NOT LIKE '⏳%' "
+               "ORDER BY id DESC LIMIT 3", (v,))
+    for r in reversed(rows):
+        try:
+            send(phone, f"*{r['title']}*\n{r['body']}")
+        except Exception:
+            return n
+        run("UPDATE inbox SET sent=1 WHERE id=?", (r["id"],))
+        n += 1
+    run("UPDATE inbox SET sent=1 WHERE vendor_id=? AND sent=0 AND body NOT LIKE '⏳%'", (v,))  # stale backlog
+    return n
 
 
 def handle(phone: str, text: str | None, wamid: str) -> None:
@@ -166,6 +215,8 @@ def handle(phone: str, text: str | None, wamid: str) -> None:
         elif t.lower() in ("stop", "unlink"):
             revoke(phone)
             _hist.pop(phone, None)
+            for tbl in ("tasks", "proposals"):  # unlinked = no more scheduled messages to this number
+                run(f"DELETE FROM {tbl} WHERE vendor_id=?", ("wa:" + phone,))
             send(phone, "Unlinked. Send *hi* any time to connect again.")
         elif t.upper().startswith("LINK-") and " " not in t:
             _redeem(phone, t)  # phone comes from the signed webhook, never from the text

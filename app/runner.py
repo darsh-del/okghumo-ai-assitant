@@ -12,7 +12,7 @@ from zoneinfo import ZoneInfo
 
 import httpx
 
-from app import assistant, mcp_auth
+from app import assistant, mcp_auth, whatsapp
 from app.credentials import NoCredential
 from app.db import run
 from app.rbac import mcp_toolset
@@ -31,7 +31,12 @@ REPORT_SYSTEM = (
 
 
 class Failed(Exception):
-    """Carries the vendor-facing message."""
+    """Carries the vendor-facing message. silent = the owner's link is gone: pause and send nothing."""
+    silent = False
+
+
+class Unlinked(Failed):
+    silent = True
 
 
 def _generate(t: dict) -> str:
@@ -40,7 +45,15 @@ def _generate(t: dict) -> str:
     except KeyError:
         raise Failed("This report can't run because your account role is no longer allowed to use the assistant.")
     try:
-        token = mcp_auth.mcp_token(t["vendor_id"])
+        if t["vendor_id"].startswith("wa:"):  # WhatsApp vendor: OkGhumo mints a token for the linked phone
+            tk = whatsapp.token(t["vendor_id"][3:])
+            if tk.get("role") not in whatsapp.ROLES or not tk.get("mcpAccessToken"):
+                raise Unlinked("")
+            token = tk["mcpAccessToken"]
+        else:
+            token = mcp_auth.mcp_token(t["vendor_id"])
+    except (whatsapp.NotLinked, whatsapp.LinkInvalid):
+        raise Unlinked("")  # number unlinked at OkGhumo: stop quietly, never message it
     except (NoCredential, KeyError, httpx.HTTPError):
         raise Failed("I couldn't open your OkGhumo account, so this report didn't run. Please reconnect your account in the app.")
     today = datetime.now(ZoneInfo(t["tz"])).strftime("%A %d %B %Y")
@@ -53,17 +66,19 @@ def _generate(t: dict) -> str:
 
 def run_report(inbox_id: int, t: dict) -> None:
     """Fill the placeholder inbox row. Never raises (a worker thread has nobody to catch it)."""
-    ok = True
+    ok, silent = True, False
     try:
         body = _generate(t)
     except Failed as e:
-        ok, body = False, str(e)
+        ok, body, silent = False, str(e), e.silent
     except Exception as e:
         log.error("report run failed: %s", type(e).__name__)
         ok, body = False, "Sorry, I couldn't prepare this report this time. I'll try again at the next scheduled time."
-    fails = 0 if ok else t["fails"] + 1
+    fails = 0 if ok else (MAX_FAILS if silent else t["fails"] + 1)
     if fails >= MAX_FAILS:
         body += "\nThis report has been paused after repeated failures. You can resume it once things are fixed."
     run("UPDATE inbox SET body=? WHERE id=? AND vendor_id=?", (body, inbox_id, t["vendor_id"]))
     run("UPDATE tasks SET fails=?, status=CASE WHEN ?>=? THEN 'paused' ELSE status END WHERE id=?",
         (fails, fails, MAX_FAILS, t["id"]))
+    if not silent:
+        whatsapp.deliver(inbox_id, t["vendor_id"], t["name"], body)  # no-op for non-WhatsApp vendors

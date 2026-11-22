@@ -10,6 +10,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from datetime import datetime
 
+from app import whatsapp
 from app.db import connect
 from app.runner import run_report
 from app.tasks import iso, next_run, now
@@ -26,17 +27,20 @@ def tick(at: datetime | None = None, submit=None) -> int:
         for t in c.execute("SELECT * FROM tasks WHERE status='active' AND next_run_at<=?", (iso(at),)).fetchall():
             report = t["kind"] == "report"
             cur = c.execute(
-                "INSERT OR IGNORE INTO inbox(vendor_id,task_id,scheduled_for,title,body,created_at) VALUES(?,?,?,?,?,?)",
-                (t["vendor_id"], t["id"], t["next_run_at"], t["name"], PENDING if report else t["message"], iso(at)),
+                "INSERT OR IGNORE INTO inbox(vendor_id,task_id,scheduled_for,title,body,created_at,sent) VALUES(?,?,?,?,?,?,?)",
+                (t["vendor_id"], t["id"], t["next_run_at"], t["name"], PENDING if report else t["message"], iso(at),
+                 0 if t["vendor_id"].startswith("wa:") else 1),
             )
             fired += cur.rowcount
-            if report and cur.rowcount:
-                jobs.append((cur.lastrowid, dict(t)))
+            if cur.rowcount and report:
+                jobs.append((run_report, cur.lastrowid, dict(t)))
+            elif cur.rowcount and t["vendor_id"].startswith("wa:"):  # WhatsApp reminder: push it out
+                jobs.append((whatsapp.deliver, cur.lastrowid, t["vendor_id"], t["name"], t["message"]))
             c.execute("UPDATE tasks SET last_run_at=?, next_run_at=? WHERE id=?",
                       (iso(at), iso(next_run(t["cron"], t["tz"], at)), t["id"]))
         c.execute("COMMIT")
     for job in jobs:  # after COMMIT: slow model calls never hold the DB write lock
-        submit(run_report, *job)
+        submit(*job)
     return fired
 
 
