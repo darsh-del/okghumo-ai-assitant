@@ -40,19 +40,22 @@ jobs:
           [ -n "$HOST" ] || { echo "::error::EC2_HOST secret is empty (Settings > Secrets and variables > Actions > Repository secrets)"; exit 1; }
           [ -n "$EC2_SSH_KEY" ] || { echo "::error::EC2_SSH_KEY secret is empty (Settings > Secrets and variables > Actions > Repository secrets)"; exit 1; }
       - name: Prepare SSH
+        env:
+          EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
         run: |
-          echo "${{ secrets.EC2_SSH_KEY }}" > key.pem && chmod 600 key.pem
+          printf '%s\n' "$EC2_SSH_KEY" > key.pem && chmod 600 key.pem
           # ponytail: trusts the host key seen now; pin EC2_KNOWN_HOSTS secret if MITM matters
           ssh-keyscan -H "$HOST" > known_hosts
-      - name: Ship code (tracked files only, no secrets)
-        run: |
-          git archive --format=tar.gz HEAD -o app.tgz
-          scp -i key.pem -o UserKnownHostsFile=known_hosts app.tgz "ec2-user@$HOST:~/app.tgz"
-      - name: Build and restart
+      - name: Pull, build and restart
+        # The server folder is a git clone of this repo (public, HTTPS). --ff-only refuses to touch a folder that was
+        # edited by hand, so a deploy can never silently overwrite anything. Secrets live in ~/chat.env, outside the repo.
         run: |
           $SSH "ec2-user@$HOST" 'set -e
-            rm -rf ~/okghumo && mkdir ~/okghumo && tar xzf ~/app.tgz -C ~/okghumo && cd ~/okghumo
-            docker rm -f chat caddy 2>/dev/null || true   # clears hand-started containers once
+            cd ~/okghumo
+            git rev-parse --is-inside-work-tree >/dev/null || { echo "::error::~/okghumo is not a git clone"; exit 1; }
+            git fetch origin dev
+            git merge --ff-only origin/dev
+            git log --oneline -1
             docker compose up -d --build
             for i in $(seq 1 20); do curl -fs localhost:8000/health && echo " deployed: healthy" && exit 0; sleep 3; done
             docker compose logs --tail 30 chat; exit 1'

@@ -81,3 +81,16 @@ The database (volume `okghumo_appdata`) is not touched by code deploys. New colu
 - Meta bills per delivered template message; check the rate card in WhatsApp Manager.
 - Each scheduled report is one model call with the read-only Okghumo tools (use `REPORT_MODEL` for a cheaper model).
 - Limits per vendor: 10 schedules, 5 reports, a report at most once a day.
+
+## Automatic deploys (GitHub Actions)
+Every push to `dev` runs the tests, then SSHes to the server, runs `git merge --ff-only origin/dev`, rebuilds and
+checks `/health`. One-time setup (repo owner, on GitHub):
+1. Actions tab > enable workflows for the repo.
+2. Settings > Secrets and variables > Actions > New repository secret:
+   - `EC2_HOST` = `13.233.170.73`
+   - `EC2_SSH_KEY` = the full contents of the `.pem` key file (paste it in the secret box only, never in chat or code)
+3. The server's firewall (EC2 security group) must allow SSH (port 22) from GitHub's runners. They use changing
+   IPs, so either open port 22 to the world with key-only login, or use a self-hosted runner / AWS SSM instead.
+4. Run it once: Actions > CI/CD > Re-run, then confirm `deployed: healthy` in the log.
+If the deploy fails with "not possible to fast-forward", someone edited files on the server: run `git status` there,
+undo the hand edit, and re-run.
