@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from croniter import croniter
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel, Field
 
 from app import logs
@@ -82,16 +82,18 @@ def check_task(v: str, message: str, cron: str, tz: str, kind: str) -> None:
         raise HTTPException(409, "already scheduled")
 
 
-def add_task(v: str, name: str, message: str, cron: str, tz: str, kind: str = "reminder", role: str | None = None) -> dict:
-    """The one place a task row is created (API and chat-confirmed)."""
+def add_task(v: str, name: str, message: str, cron: str, tz: str, kind: str = "reminder", role: str | None = None,
+             fmt: str = "text") -> dict:
+    """The one place a task row is created (API and chat-confirmed). fmt=pdf only makes sense for reports."""
     check_task(v, message, cron, tz, kind)
+    fmt = "pdf" if fmt == "pdf" and kind == "report" else "text"
     n = now()
     t = dict(run(
-        "INSERT INTO tasks(vendor_id,name,message,cron,tz,kind,role,next_run_at,created_at) "
-        "VALUES(?,?,?,?,?,?,?,?,?) RETURNING *",
-        (v, name, message, cron, tz, kind, role, iso(next_run(cron, tz, n)), iso(n)),
+        "INSERT INTO tasks(vendor_id,name,message,cron,tz,kind,role,format,next_run_at,created_at) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?) RETURNING *",
+        (v, name, message, cron, tz, kind, role, fmt, iso(next_run(cron, tz, n)), iso(n)),
     )[0])
-    logs.event(log, "task_created", vendor=logs.mask_id(v), task=t["id"], kind=kind, cron=cron, tz=tz)
+    logs.event(log, "task_created", vendor=logs.mask_id(v), task=t["id"], kind=kind, fmt=fmt, cron=cron, tz=tz)
     return t
 
 
@@ -124,8 +126,18 @@ def delete_task(task_id: int, claims: dict = Depends(current_user)):
 
 @router.get("/inbox")
 def inbox(unread: bool = False, claims: dict = Depends(current_user)):
-    sql = "SELECT * FROM inbox WHERE vendor_id=?" + (" AND read=0" if unread else "") + " ORDER BY id DESC LIMIT 100"
-    return [dict(r) for r in run(sql, (claims["sub"],))]
+    sql = ("SELECT id,vendor_id,task_id,scheduled_for,title,body,read,created_at,sent,pdf IS NOT NULL AS has_pdf "
+           "FROM inbox WHERE vendor_id=?" + (" AND read=0" if unread else "") + " ORDER BY id DESC LIMIT 100")
+    return [dict(r) for r in run(sql, (claims["sub"],))]  # never SELECT the pdf blob here
+
+
+@router.get("/inbox/{item_id}/pdf")
+def inbox_pdf(item_id: int, claims: dict = Depends(current_user)):
+    rows = run("SELECT pdf FROM inbox WHERE id=? AND vendor_id=? AND pdf IS NOT NULL", (item_id, claims["sub"]))
+    if not rows:
+        raise HTTPException(404, "not found")  # same answer for "missing" and "someone else's"
+    return Response(rows[0]["pdf"], media_type="application/pdf",
+                    headers={"Content-Disposition": 'attachment; filename="okghumo-report.pdf"'})
 
 
 @router.post("/inbox/{item_id}/read", status_code=204)

@@ -9,7 +9,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-from app import guard, logs, mcp_auth, ratelimit, sanitize, schedules, tasks, whatsapp
+from app import guard, logs, mcp_auth, ratelimit, reports, sanitize, schedules, tasks, whatsapp
 from app.assistant import SYSTEM, ask, get_client  # noqa: F401 (get_client is the test override key)
 from app.auth import current_user
 from app.credentials import NoCredential
@@ -111,8 +111,13 @@ def chat(body: ChatIn, claims: dict = Depends(current_user), client=Depends(get_
         logs.event(log, "chat_denied", logging.ERROR, reason="mcp_exchange_failed", vendor=who, error=type(e).__name__)
         raise HTTPException(502, "okghumo auth unavailable")
     sched = schedules.for_vendor(vendor, role)
-    out = ask(client, role, token, msgs, SYSTEM + (schedules.SCHED_SYSTEM if sched else ""), extra=sched)
+    rep = reports.for_vendor(client, vendor, role, token)  # on-demand PDF report tool (reads only, daily cap)
+    out = ask(client, role, token, msgs, SYSTEM + (schedules.SCHED_SYSTEM if sched else "") + (reports.ASK_SYSTEM if rep else ""),
+              extra=reports.Combo(sched, rep) if (sched or rep) else None)
     reply = sanitize.clean_reply(out["reply"], msgs)  # presentation only: ids, dashes, emoji cap (digits untouched)
     logs.event(log, "chat_reply", vendor=who, source="model", model_called=True, stop=out["stop_reason"],
                tools=",".join(out["tools_used"]) or None, reply_chars=len(reply))
-    return {**out, "reply": sched.finish(reply) if sched else reply}
+    res = {**out, "reply": sched.finish(reply) if sched else reply}
+    if rep and rep.pdf_id:
+        res["pdf_id"] = rep.pdf_id  # client downloads it with GET /inbox/{pdf_id}/pdf
+    return res

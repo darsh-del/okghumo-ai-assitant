@@ -13,7 +13,7 @@ from zoneinfo import ZoneInfo
 
 import httpx
 
-from app import assistant, logs, mcp_auth, whatsapp
+from app import assistant, logs, mcp_auth, pdfreport, whatsapp
 from app.credentials import NoCredential
 from app.db import run
 from app.rbac import mcp_toolset
@@ -40,7 +40,8 @@ class Unlinked(Failed):
     silent = True
 
 
-def _generate(t: dict) -> str:
+def _generate(t: dict) -> tuple[str, bytes | None]:
+    """(inbox text, pdf bytes or None). A pdf report's text is a short summary; the detail is in the file."""
     try:
         mcp_toolset(t["role"])  # role gate BEFORE any token mint or model call
     except KeyError:
@@ -59,19 +60,26 @@ def _generate(t: dict) -> str:
         raise Unlinked("")  # number unlinked at OkGhumo: stop quietly, never message it
     except (NoCredential, KeyError, httpx.HTTPError):
         raise Failed("I couldn't open your OkGhumo account, so this report didn't run. Please reconnect your account in the app.")
-    today = datetime.now(ZoneInfo(t["tz"])).strftime("%A %d %B %Y")
+    tz = t["tz"]
+    if t.get("format") == "pdf":
+        try:
+            spec, pdf = pdfreport.generate(assistant.get_client(), t["role"], token, t["message"], tz)
+        except pdfreport.BadSpec:
+            raise Failed("I couldn't put the PDF report together this time. I'll try again at the next scheduled time.")
+        return pdfreport.text_of(spec)[:MAX_BODY], pdf
+    today = datetime.now(ZoneInfo(tz)).strftime("%A %d %B %Y")
     out = assistant.ask(assistant.get_client(), t["role"], token, [{"role": "user", "content": t["message"]}],
-                        REPORT_SYSTEM.format(today=today, tz=t["tz"]), model=os.environ.get("REPORT_MODEL"))
+                        REPORT_SYSTEM.format(today=today, tz=tz), model=os.environ.get("REPORT_MODEL"))
     if not out["reply"].strip():
         raise Failed("I couldn't put this report together this time. I'll try again at the next scheduled time.")
-    return out["reply"].strip()[:MAX_BODY]
+    return out["reply"].strip()[:MAX_BODY], None
 
 
 def run_report(inbox_id: int, t: dict) -> None:
     """Fill the placeholder inbox row. Never raises (a worker thread has nobody to catch it)."""
-    ok, silent, t0 = True, False, time.time()
+    ok, silent, t0, pdf = True, False, time.time(), None
     try:
-        body = _generate(t)
+        body, pdf = _generate(t)
     except Failed as e:
         ok, body, silent = False, str(e), e.silent
     except Exception as e:
@@ -83,8 +91,8 @@ def run_report(inbox_id: int, t: dict) -> None:
                paused=fails >= MAX_FAILS or None, ms=int((time.time() - t0) * 1000))
     if fails >= MAX_FAILS:
         body += "\nThis report has been paused after repeated failures. You can resume it once things are fixed."
-    run("UPDATE inbox SET body=? WHERE id=? AND vendor_id=?", (body, inbox_id, t["vendor_id"]))
+    run("UPDATE inbox SET body=?, pdf=? WHERE id=? AND vendor_id=?", (body, pdf, inbox_id, t["vendor_id"]))
     run("UPDATE tasks SET fails=?, status=CASE WHEN ?>=? THEN 'paused' ELSE status END WHERE id=? AND vendor_id=?",
         (fails, fails, MAX_FAILS, t["id"], t["vendor_id"]))
     if not silent:
-        whatsapp.deliver(inbox_id, t["vendor_id"], t["name"], body)  # no-op for non-WhatsApp vendors
+        whatsapp.deliver(inbox_id, t["vendor_id"], t["name"], body, pdf)  # no-op for non-WhatsApp vendors

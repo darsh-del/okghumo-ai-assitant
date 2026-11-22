@@ -13,6 +13,7 @@ import hmac
 import json
 import logging
 import os
+import re
 import threading
 import time
 from contextlib import closing
@@ -22,7 +23,7 @@ import jwt
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from fastapi.responses import PlainTextResponse
 
-from app import assistant, guard, lang, logs, ratelimit, sanitize, schedules, voice
+from app import assistant, guard, lang, logs, ratelimit, reports, sanitize, schedules, voice
 from app.db import connect, run
 
 log = logging.getLogger("whatsapp")
@@ -109,6 +110,25 @@ def _graph(payload: dict) -> None:
 def send(to: str, text: str) -> None:
     for i in range(0, max(len(text), 1), 4000):  # WhatsApp text limit is 4096
         _graph({"to": to, "type": "text", "text": {"body": text[i:i + 4000]}})
+
+
+def send_pdf(to: str, pdf: bytes, title: str, caption: str) -> None:
+    """Upload our own generated PDF to Meta, then send it as a document (caption max 1024). Never a vendor-supplied file."""
+    base = f"https://graph.facebook.com/{os.environ.get('WHATSAPP_API_VERSION', 'v23.0')}/{os.environ['WHATSAPP_PHONE_NUMBER_ID']}"
+    auth = {"Authorization": "Bearer " + os.environ["WHATSAPP_TOKEN"]}
+    up = httpx.post(base + "/media", headers=auth, timeout=30, data={"messaging_product": "whatsapp", "type": "application/pdf"},
+                    files={"file": ("report.pdf", pdf, "application/pdf")})
+    up.raise_for_status()
+    name = (re.sub(r"[^A-Za-z0-9 _-]", "", title).strip()[:40] or "report") + ".pdf"
+    _graph({"to": to, "type": "document", "document": {"id": up.json()["id"], "filename": name, "caption": caption[:1000]}})
+
+
+def _push(phone: str, title: str, body: str, pdf: bytes | None = None) -> None:
+    """One scheduled item to the phone: a PDF report goes out as ONE document message (text in the caption)."""
+    if pdf:
+        send_pdf(phone, pdf, title, f"*{title}*\n{body}")
+    else:
+        send(phone, f"*{title}*\n{body}")
 
 
 # ---- small in-memory state (see ponytail note) ----
@@ -213,8 +233,11 @@ def _answer(phone: str, text: str, wamid: str, voice: bool = False) -> None:
         _remember(phone, msgs + [{"role": "assistant", "content": blocked[1]}])
         return send(phone, blocked[1])
     sched = schedules.for_vendor(vendor, t["role"])
-    out = assistant.ask(assistant.get_client(), t["role"], t["mcpAccessToken"], msgs,
-                        SYSTEM + (schedules.SCHED_SYSTEM + schedules.WA_SCHED if sched else ""), extra=sched)
+    client = assistant.get_client()
+    rep = reports.for_vendor(client, vendor, t["role"], t["mcpAccessToken"])  # on-demand PDF report tool
+    out = assistant.ask(client, t["role"], t["mcpAccessToken"], msgs,
+                        SYSTEM + (schedules.SCHED_SYSTEM + schedules.WA_SCHED if sched else "") + (reports.ASK_SYSTEM if rep else ""),
+                        extra=reports.Combo(sched, rep) if (sched or rep) else None)
     clean = sanitize.clean_reply(out["reply"], msgs)  # presentation only: ids, dashes, emoji cap (digits untouched)
     reply = sched.finish(clean) if sched else clean
     reply = reply or "Sorry, I couldn't find an answer to that."
@@ -222,10 +245,16 @@ def _answer(phone: str, text: str, wamid: str, voice: bool = False) -> None:
                tools=",".join(out["tools_used"]) or None, reply_chars=len(reply))
     _remember(phone, msgs + [{"role": "assistant", "content": reply}])
     send(phone, reply)
+    if rep and rep.pdf:  # the report the vendor chose: pushed as a document (never stored for WhatsApp vendors)
+        try:
+            send_pdf(phone, rep.pdf[1], rep.pdf[0], "*" + rep.pdf[0] + "*")
+        except Exception as e:
+            logs.event(log, "delivery_failed", logging.ERROR, phone=logs.mask_phone(phone), via="pdf", error=type(e).__name__)
+            send(phone, "Sorry, I couldn't attach the PDF just now. Please ask me again in a minute, or I can share the key figures here.")
 
 
 # ---- scheduled delivery ----
-def deliver(inbox_id: int, vendor: str, title: str, body: str) -> None:
+def deliver(inbox_id: int, vendor: str, title: str, body: str, pdf: bytes | None = None) -> None:
     """Send one inbox row to its WhatsApp owner. Free text only works inside Meta's 24h window; outside it we send
     an approved template (WHATSAPP_REPORT_TEMPLATE, one text variable = the title) and keep the row unsent, so
     flush() delivers it when the vendor next writes. Never raises."""
@@ -233,7 +262,7 @@ def deliver(inbox_id: int, vendor: str, title: str, body: str) -> None:
         return
     phone = vendor[3:]
     try:
-        send(phone, f"*{title}*\n{body}")
+        _push(phone, title, body, pdf)
         run("UPDATE inbox SET sent=1 WHERE id=? AND vendor_id=?", (inbox_id, vendor))
         logs.event(log, "delivered", phone=logs.mask_phone(phone), inbox=inbox_id, via="text")
     except httpx.HTTPStatusError:  # window closed (or Meta refused)
@@ -258,11 +287,11 @@ def deliver(inbox_id: int, vendor: str, title: str, body: str) -> None:
 def flush(phone: str) -> int:
     """Vendor just wrote (24h window open): send the latest undelivered scheduled items, drop older ones."""
     v, n = "wa:" + phone, 0
-    rows = run("SELECT id,title,body FROM inbox WHERE vendor_id=? AND sent=0 AND body NOT LIKE '⏳%' "
+    rows = run("SELECT id,title,body,pdf FROM inbox WHERE vendor_id=? AND sent=0 AND body NOT LIKE '⏳%' "
                "ORDER BY id DESC LIMIT 3", (v,))
     for r in reversed(rows):
         try:
-            send(phone, f"*{r['title']}*\n{r['body']}")
+            _push(phone, r["title"], r["body"], r["pdf"])
         except Exception:
             return n
         run("UPDATE inbox SET sent=1 WHERE id=?", (r["id"],))

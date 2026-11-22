@@ -495,3 +495,68 @@ def test_voice_note_skips_the_typing_wait_but_text_still_waits(env, monkeypatch)
     monkeypatch.setattr(w, "_transcribe", lambda p, m: "text")
     w.process("919800000001")
     assert waits == [5.0, 0]
+
+
+# ---- PDF reports over WhatsApp (on-demand and scheduled) ----
+from datetime import datetime, timedelta  # noqa: E402
+
+SPECJ = ('{"title":"Weekly sales","summary":"Sales were Rs. 12,500.","kpis":[{"label":"Revenue","value":"Rs. 12,500"}],'
+         '"charts":[{"type":"bar","title":"By source","labels":["online","agent"],"values":[5000,7500]}]}')
+
+
+def T(t): return NS(type="text", text=t)
+
+
+@pytest.fixture
+def docs(sch, monkeypatch):
+    sch.docs = []
+    monkeypatch.setattr(w, "send_pdf", lambda *a: sch.docs.append(a))
+    return sch
+
+
+def test_wa_on_demand_pdf_asks_politely_then_sends_document_and_stores_nothing(docs):
+    docs.model = Script([NS(type="tool_use", id="t", name="create_pdf_report", input={"question": "Sales last 30 days"})],
+                        [T(SPECJ)], [T("Your report is ready, thank you for waiting.")])
+    post("detailed report of last month sales")
+    assert said(docs) == ["Your report is ready, thank you for waiting."]
+    (to, pdf, title, cap), = docs.docs
+    assert to == P and pdf.startswith(b"%PDF") and title == "Weekly sales"
+    outer, nested = docs.model.calls[0], docs.model.calls[1]
+    assert "DETAILED REPORTS" in outer["system"] and "WhatsApp" in outer["system"] and "politely" in outer["system"]
+    assert len(nested["tools"]) == 1 and nested["mcp_servers"][0]["authorization_token"] == "tok"  # read-only, own token
+    assert not dbrun("SELECT 1 FROM inbox WHERE vendor_id=?", ("wa:" + P,))
+
+
+def test_wa_pdf_attach_failure_apologises(docs, monkeypatch):
+    def boom(*a): raise httpx.ConnectError("x")
+    monkeypatch.setattr(w, "send_pdf", boom)
+    docs.model = Script([NS(type="tool_use", id="t", name="create_pdf_report", input={"question": "q"})], [T(SPECJ)], [T("Ready!")])
+    post("detailed report of last month sales")
+    assert said(docs)[0] == "Ready!" and "couldn't attach the PDF" in said(docs)[-1]
+
+
+def test_wa_scheduled_pdf_report_is_delivered_as_document_then_held_if_window_closed(docs, monkeypatch):
+    from app.tasks import add_task
+    t = add_task("wa:" + P, "Weekly", "Sales last 7 days", "0 8 * * *", "Asia/Kolkata", "report", "vendor", "pdf")
+    due = datetime.fromisoformat(t["next_run_at"]) + timedelta(minutes=1)
+    monkeypatch.setattr(runner.assistant, "get_client", lambda: Script([T(SPECJ)]))
+    scheduler.tick(due)
+    (to, pdf, title, cap), = docs.docs
+    assert to == P and pdf.startswith(b"%PDF") and cap.startswith("*Weekly*")
+    assert dbrun("SELECT sent FROM inbox WHERE vendor_id=?", ("wa:" + P,))[0]["sent"] == 1
+    # window closed: Meta refuses, the row stays unsent and is delivered when the vendor next writes
+    docs.docs.clear()
+    n = {"i": 0}
+    def closed(*a):
+        n["i"] += 1
+        if n["i"] == 1:
+            raise httpx.HTTPStatusError("x", request=httpx.Request("POST", "http://x"), response=httpx.Response(400))
+        docs.docs.append(a)
+    monkeypatch.setattr(w, "send_pdf", closed)
+    dbrun("UPDATE tasks SET next_run_at=? WHERE id=?", (t["next_run_at"], t["id"]))
+    dbrun("DELETE FROM inbox")
+    monkeypatch.setattr(runner.assistant, "get_client", lambda: Script([T(SPECJ)]))
+    scheduler.tick(due)
+    assert dbrun("SELECT sent FROM inbox")[0]["sent"] == 0 and not docs.docs
+    post("hello")  # vendor writes: window open again
+    assert len(docs.docs) == 1 and dbrun("SELECT sent FROM inbox")[0]["sent"] == 1

@@ -86,7 +86,7 @@ def _dump(b) -> dict:
 
 
 def ask(client, role: str | None, mcp_access_token: str, messages: list[dict], system: str = SYSTEM,
-        extra=None, model: str | None = None) -> dict:
+        extra=None, model: str | None = None, max_tokens: int | None = None) -> dict:
     """KeyError if the role is unknown (deny by default). The caller supplies THIS vendor's token.
 
     `extra` (optional) adds app-side function tools: an object with `.tools` (schemas) and `.call(name, input) -> str`.
@@ -101,7 +101,7 @@ def ask(client, role: str | None, mcp_access_token: str, messages: list[dict], s
     for step in range(1, MAX_STEPS + 1):
         r = client.beta.messages.create(
             model=model or os.environ.get("CHAT_MODEL", "claude-opus-5-5"),
-            max_tokens=int(os.environ.get("MAX_REPLY_TOKENS", "2000")),  # answers are short; 16000 only raised cost
+            max_tokens=max_tokens or int(os.environ.get("MAX_REPLY_TOKENS", "2000")),  # answers are short; 16000 only raised cost
             betas=["mcp-client-2025-11-20"],
             system=system,
             messages=msgs,

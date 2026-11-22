@@ -34,6 +34,8 @@ MIGRATIONS = [
     ("tasks", "role", "TEXT"),                               # role at creation, re-checked on every run
     ("tasks", "fails", "INTEGER NOT NULL DEFAULT 0"),        # consecutive failed runs; auto-pause at 5
     ("inbox", "sent", "INTEGER NOT NULL DEFAULT 1"),         # WhatsApp rows start 0 until actually delivered
+    ("tasks", "format", "TEXT NOT NULL DEFAULT 'text'"),     # reports only: text (short message) | pdf (analytics + charts)
+    ("inbox", "pdf", "BLOB"),                                # the generated PDF for a pdf report (this app's own DB)
 ]
 
 

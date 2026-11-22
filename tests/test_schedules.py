@@ -13,7 +13,7 @@ from fastapi.testclient import TestClient
 os.environ.update(JWT_SECRET="s", OKGHUMO_MCP_URL="https://mcp.test/mcp")
 import app.main as m  # noqa: E402
 import app.runner as runner  # noqa: E402
-from app import assistant, db, scheduler, schedules  # noqa: E402
+from app import assistant, db, pdfreport, scheduler, schedules  # noqa: E402
 from app.credentials import NoCredential  # noqa: E402
 from app.db import run  # noqa: E402
 from app.main import app, get_client  # noqa: E402
@@ -162,7 +162,7 @@ def test_tools_offered_are_propose_or_read_only_and_mcp_stays_read_only():
     out, f = chat("A", [user("what are my sales?")])
     tools = f.calls[0]["tools"]
     assert set(tools[0]["configs"]) <= READ_ONLY_TOOLS and tools[0]["default_config"] == {"enabled": False}
-    assert [t["name"] for t in tools[1:]] == ["propose_schedule", "propose_cancel", "list_schedules"]
+    assert [t["name"] for t in tools[1:]] == ["propose_schedule", "propose_cancel", "list_schedules", "create_pdf_report"]
     assert "NOT scheduled" in schedules.Scheduling("A", "vendor").call("propose_schedule", GOOD)
 
 
@@ -170,7 +170,7 @@ def test_kill_switch_removes_tools_and_confirmation(monkeypatch):
     reply = proposed("A")
     monkeypatch.setenv("SCHEDULING_VIA_CHAT", "0")
     out, f = chat("A", [bot(reply), user("yes")])
-    assert len(f.calls) == 1 and f.calls[0]["tools"][1:] == [] and tasks_of("A") == []
+    assert len(f.calls) == 1 and [t["name"] for t in f.calls[0]["tools"][1:]] == ["create_pdf_report"] and tasks_of("A") == []
 
 
 def test_unknown_role_gets_no_scheduling():
@@ -357,3 +357,126 @@ def test_old_tasks_table_is_migrated(monkeypatch):
     row = run("SELECT * FROM tasks")[0]
     assert (row["kind"], row["role"], row["fails"]) == ("reminder", None, 0)
     run("SELECT * FROM tasks")  # second connect is a no-op
+
+
+# ---------- PDF reports (format=pdf) ----------
+SPEC = ('{"title":"Weekly sales","period":"Last 7 days","summary":"Sales were ₹12,500 across 8 bookings.",'
+        '"kpis":[{"label":"Revenue","value":"₹12,500"}],'
+        '"charts":[{"type":"bar","title":"By source","labels":["online","agent"],"values":[5000,7500]}],'
+        '"tables":[{"title":"Top","columns":["Agent","Amt"],"rows":[["<b>Ravi</b> & co","₹100"]]}],"insights":["Agents lead"]}')
+
+
+def make_pdf_report(vendor, role="vendor"):
+    t = __import__("app.tasks", fromlist=["x"]).add_task(vendor, "Weekly", "Sales last 7 days", "0 8 * * *", "Asia/Kolkata", "report", role, "pdf")
+    return t, datetime.fromisoformat(t["next_run_at"]) + timedelta(minutes=1)
+
+
+def hdr(v): return {"Authorization": "Bearer " + jwt.encode({"sub": v, "role": "vendor"}, "s", algorithm="HS256")}
+
+
+def test_pdfreport_parse_clamps_and_render_handles_markup():
+    from app import pdfreport
+    s = pdfreport.parse("noise " + SPEC + " noise")
+    assert pdfreport.render(s).startswith(b"%PDF") and "Rs. 12,500" in pdfreport.text_of(s)
+    bad = pdfreport.parse('{"summary":"x","charts":[{"type":"pie","labels":["a"],"values":[-1]},{"type":"bar","labels":["a","b"],"values":[1]},'
+                          '{"type":"line","labels":["a"],"values":[1]},{"type":"evil","labels":["a"],"values":[1]}]}')
+    assert bad["charts"] == []
+    for junk in ("", "not json", "[]", '{"charts":[]}'):
+        with pytest.raises(pdfreport.BadSpec):
+            pdfreport.parse(junk)
+
+
+def test_pdf_format_proposal_then_yes_stores_format_and_reminders_stay_text():
+    reply = proposed("PF", format="pdf")
+    assert "PDF" in reply
+    chat("PF", [user("x"), bot(reply), user("yes")])
+    assert tasks_of("PF")[0]["format"] == "pdf"
+    reply = proposed("PR", kind="reminder", format="pdf")
+    assert "PDF" not in reply
+    chat("PR", [user("x"), bot(reply), user("yes")])
+    assert tasks_of("PR")[0]["format"] == "text"
+    assert schedules._clean({**GOOD})["format"] == "text"  # default
+    with pytest.raises(ValueError):
+        schedules._clean({**GOOD, "format": "docx"})
+
+
+def test_pdf_report_run_stores_pdf_and_stays_readonly(monkeypatch):
+    t, due = make_pdf_report("P1")
+    f, (row,) = fire(t, due, monkeypatch, fake=Fake([text(SPEC)]))
+    assert row["pdf"].startswith(b"%PDF") and "Rs. 12,500" in row["body"] and "{" not in row["body"]
+    call = f.calls[0]
+    assert "OUTPUT FORMAT" in call["system"] and call["max_tokens"] == pdfreport.PDF_TOKENS
+    assert len(call["tools"]) == 1 and set(call["tools"][0]["configs"]) <= READ_ONLY_TOOLS
+    assert run("SELECT fails FROM tasks WHERE id=?", (t["id"],))[0]["fails"] == 0
+
+
+def test_text_report_unchanged_and_bad_pdf_json_fails_cleanly(monkeypatch):
+    t, due = make_report("P2")
+    f, (row,) = fire(t, due, monkeypatch)
+    assert row["pdf"] is None and "OUTPUT FORMAT" not in f.calls[0]["system"]
+    t, due = make_pdf_report("P3")
+    f, (row,) = fire(t, due, monkeypatch, fake=Fake([text("Sorry, here are some numbers in prose")]))
+    assert row["pdf"] is None and "PDF" in row["body"]
+    assert run("SELECT fails FROM tasks WHERE id=?", (t["id"],))[0]["fails"] == 1
+
+
+def test_inbox_lists_has_pdf_without_blob_and_pdf_download_is_owner_only(monkeypatch):
+    t, due = make_pdf_report("P4")
+    fire(t, due, monkeypatch, fake=Fake([text(SPEC)]))
+    items = c.get("/inbox", headers=hdr("P4")).json()
+    assert items[0]["has_pdf"] == 1 and "pdf" not in items[0]
+    r = c.get(f"/inbox/{items[0]['id']}/pdf", headers=hdr("P4"))
+    assert r.status_code == 200 and r.headers["content-type"] == "application/pdf" and r.content.startswith(b"%PDF")
+    assert c.get(f"/inbox/{items[0]['id']}/pdf", headers=hdr("OTHER")).status_code == 404
+
+
+def test_whatsapp_pdf_report_is_sent_as_document(monkeypatch):
+    from app import whatsapp
+    sent = []
+    monkeypatch.setattr(whatsapp, "send_pdf", lambda *a: sent.append(a))
+    monkeypatch.setattr(whatsapp, "send", lambda *a: sent.append(("text",) + a))
+    iid = run("INSERT INTO inbox(vendor_id,task_id,scheduled_for,title,body,created_at,sent) VALUES('wa:1',1,'s','Weekly','b','n',0) RETURNING id")[0]["id"]
+    whatsapp.deliver(iid, "wa:1", "Weekly", "Sales were X", b"%PDF-1")
+    assert sent == [("1", b"%PDF-1", "Weekly", "*Weekly*\nSales were X")]
+    assert run("SELECT sent FROM inbox WHERE id=?", (iid,))[0]["sent"] == 1
+
+
+# ---------- on-demand PDF report in chat ----------
+ASK = [user("give me a detailed report of last month sales")]
+
+
+def test_on_demand_pdf_tool_creates_pdf_for_owner_only_readonly_nested_call():
+    f = Fake([tool("create_pdf_report", {"question": "Sales and bookings, last 30 days"})], [text(SPEC)], [text("Your report is ready.")])
+    out, f = chat("OD", ASK, f)
+    assert out["reply"] == "Your report is ready." and out["pdf_id"]
+    outer, nested = f.calls[0], f.calls[1]
+    assert "DETAILED REPORTS" in outer["system"] and "politely" in outer["system"]
+    assert [t["name"] for t in outer["tools"][1:]] == ["propose_schedule", "propose_cancel", "list_schedules", "create_pdf_report"]
+    assert "OUTPUT FORMAT" in nested["system"] and len(nested["tools"]) == 1  # nested call: read-only MCP only, no app tools
+    assert nested["mcp_servers"][0]["authorization_token"] == "mcp-OD"
+    r = c.get(f"/inbox/{out['pdf_id']}/pdf", headers=hdr("OD"))
+    assert r.status_code == 200 and r.content.startswith(b"%PDF")
+    assert c.get(f"/inbox/{out['pdf_id']}/pdf", headers=hdr("OTHER")).status_code == 404
+
+
+def test_on_demand_pdf_failure_and_daily_cap_and_kill_switch(monkeypatch):
+    out, f = chat("OF", ASK, Fake([tool("create_pdf_report", {"question": "x"})], [text("not json")], [text("Sorry, here are the figures.")]))
+    assert "pdf_id" not in out and "error" in str(f.calls[2]["messages"][-1]["content"])
+    monkeypatch.setenv("RATE_PDF_PER_DAY", "1")
+    chat("OC", ASK, Fake([tool("create_pdf_report", {"question": "x"})], [text(SPEC)], [text("ok")]))
+    out, f = chat("OC", ASK, Fake([tool("create_pdf_report", {"question": "x"})], [text("never used")]))
+    assert "pdf_id" not in out and "daily limit" in str(f.calls[1]["messages"][-1]["content"]) and len(f.calls) == 2
+    monkeypatch.setenv("PDF_REPORTS", "0")
+    out, f = chat("OK", ASK)
+    assert "create_pdf_report" not in [t.get("name") for t in f.calls[0]["tools"]] and "DETAILED REPORTS" not in f.calls[0]["system"]
+
+
+def test_on_demand_whatsapp_vendor_gets_file_object_but_nothing_stored(monkeypatch):
+    from app import reports
+    monkeypatch.setattr(reports.pdfreport, "generate", lambda *a: (pdfreport.parse(SPEC), b"%PDF-x"))
+    h = reports.OnDemand(None, "wa:99", "vendor", "tok")
+    assert h.call("create_pdf_report", {"question": "q"}).startswith("PDF created")
+    assert h.pdf == ("Weekly sales", b"%PDF-x") and h.pdf_id is None
+    assert run("SELECT 1 FROM inbox WHERE vendor_id='wa:99'") == []
+    assert h.call("create_pdf_report", {"question": "q"}).startswith("error")  # one per message
+    assert reports.OnDemand(None, "v", "hacker", "t").call("create_pdf_report", {"question": "q"}).startswith("error")

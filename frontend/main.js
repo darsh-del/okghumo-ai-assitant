@@ -8,7 +8,7 @@ const store = { // localStorage can throw (private mode); never let that break t
 let messages = [] // stateless API: send full history each time
 let busy = false
 
-const SUGGESTIONS = ['How were my sales this month?', 'Who owes me money?', 'Show bookings by source (online, agent, offline)', 'Send me a daily sales summary at 8 am']
+const SUGGESTIONS = ['How were my sales this month?', 'Who owes me money?', 'Show bookings by source (online, agent, offline)', 'Send me a daily sales summary at 8 am', 'Give me a detailed report of last month']
 const ERRORS = {
   401: 'Your access token is missing, invalid or expired. Paste a fresh one in Settings.',
   403: "This account's role is not allowed to use the assistant.",
@@ -61,6 +61,22 @@ const typing = () => {
   return d
 }
 
+const pdfButton = (id) => {
+  const b = document.createElement('button')
+  b.type = 'button'; b.className = 'dl'; b.textContent = 'Download PDF'
+  b.onclick = async () => {
+    b.disabled = true
+    try {
+      const r = await fetch(`${API}/inbox/${id}/pdf`, { headers: { Authorization: `Bearer ${jwt.value.trim()}` } })
+      if (!r.ok) throw new Error()
+      const a = Object.assign(document.createElement('a'), { href: URL.createObjectURL(await r.blob()), download: 'okghumo-report.pdf' })
+      a.click(); URL.revokeObjectURL(a.href)
+    } catch { b.textContent = 'Download failed, try again' }
+    b.disabled = false
+  }
+  return b
+}
+
 const setBusy = (b) => { busy = b; $('send').disabled = b }
 
 async function send(text) {
@@ -79,10 +95,11 @@ async function send(text) {
       body: JSON.stringify({ messages }),
     })
     if (!r.ok) throw new Error(ERRORS[r.status] ?? `Request failed (HTTP ${r.status})`)
-    const { reply, tools_used } = await r.json()
+    const { reply, tools_used, pdf_id } = await r.json()
     messages.push({ role: 'assistant', content: reply })
     t.remove()
-    add('assistant', reply || '(no answer)', tools_used)
+    const m = add('assistant', reply || '(no answer)', tools_used)
+    if (pdf_id) m.append(pdfButton(pdf_id))
   } catch (err) {
     t.remove()
     messages.pop() // drop the unanswered user turn so a retry doesn't send a dangling message
