@@ -21,7 +21,7 @@ import httpx
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from fastapi.responses import PlainTextResponse
 
-from app import assistant, schedules
+from app import assistant, guard, schedules
 from app.db import connect, run
 
 log = logging.getLogger("whatsapp")
@@ -158,6 +158,10 @@ def _answer(phone: str, text: str, wamid: str) -> None:
         return send(phone, done)
     if flush(phone) and len(text) <= 10:  # a ping that only opened the 24h window: reports are enough
         return
+    refusal = guard.check(msgs)  # off-topic / injection / oversized / greeting: canned polite reply, no model call
+    if refusal:
+        _remember(phone, msgs + [{"role": "assistant", "content": refusal}])
+        return send(phone, refusal)
     sched = schedules.for_vendor(vendor, t["role"])
     out = assistant.ask(assistant.get_client(), t["role"], t["mcpAccessToken"], msgs,
                         SYSTEM + (schedules.SCHED_SYSTEM + schedules.WA_SCHED if sched else ""), extra=sched)

@@ -6,7 +6,7 @@ from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-from app import mcp_auth, schedules, tasks, whatsapp
+from app import guard, mcp_auth, schedules, tasks, whatsapp
 from app.assistant import SYSTEM, ask, get_client  # noqa: F401 (get_client is the test override key)
 from app.auth import current_user
 from app.credentials import NoCredential
@@ -65,6 +65,10 @@ def chat(body: ChatIn, claims: dict = Depends(current_user), client=Depends(get_
     done = schedules.intercept(vendor, role, msgs)  # vendor's yes/no to OUR confirmation prompt: handled in code
     if done is not None:
         return {"reply": done, "tools_used": [], "stop_reason": "end_turn"}
+    refusal = guard.check(msgs)  # off-topic / injection / oversized: polite canned reply, no model call
+    if refusal:
+        return {"reply": refusal, "tools_used": [], "stop_reason": "end_turn"}
+    msgs = guard.trim(msgs)
     try:
         token = mcp_token(vendor)  # this vendor's own token; fails closed, no model call
     except NoCredential:

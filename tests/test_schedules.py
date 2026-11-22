@@ -152,14 +152,14 @@ def test_non_yes_answer_goes_to_model_and_new_proposal_replaces_old():
 def test_only_one_proposal_per_message_injection_cant_stack():
     f = Fake([propose(name="one", i="t1") , propose(name="two", i="t2")], [text("ok")])
     f.script[0][1].id = "t2"
-    chat("A", [user("hi")], f)
+    chat("A", [user("what are my sales?")], f)
     assert "one" in run("SELECT payload FROM proposals")[0]["payload"] and len(run("SELECT * FROM proposals")) == 1
     sent = f.calls[1]["messages"][-1]["content"]  # tool results fed back
     assert sent[1]["is_error"] and "one proposal" in sent[1]["content"]
 
 
 def test_tools_offered_are_propose_or_read_only_and_mcp_stays_read_only():
-    out, f = chat("A", [user("hi")])
+    out, f = chat("A", [user("what are my sales?")])
     tools = f.calls[0]["tools"]
     assert set(tools[0]["configs"]) <= READ_ONLY_TOOLS and tools[0]["default_config"] == {"enabled": False}
     assert [t["name"] for t in tools[1:]] == ["propose_schedule", "propose_cancel", "list_schedules"]
@@ -176,12 +176,12 @@ def test_kill_switch_removes_tools_and_confirmation(monkeypatch):
 def test_unknown_role_gets_no_scheduling():
     app.dependency_overrides[get_client] = lambda: Fake()
     h = {"Authorization": "Bearer " + jwt.encode({"sub": "A", "role": "hacker"}, "s", algorithm="HS256")}
-    assert c.post("/chat", json={"messages": [user("hi")]}, headers=h).status_code == 403
+    assert c.post("/chat", json={"messages": [user("what are my sales?")]}, headers=h).status_code == 403
 
 
 def test_tool_loop_is_capped():
     f = Fake(*[[tool("list_schedules", {}, f"t{i}")] for i in range(20)])
-    chat("A", [user("hi")], f)
+    chat("A", [user("what are my sales?")], f)
     assert len(f.calls) == assistant.MAX_STEPS
 
 
