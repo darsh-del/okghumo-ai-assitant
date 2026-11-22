@@ -18,6 +18,7 @@ import time
 from contextlib import closing
 
 import httpx
+import jwt
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from fastapi.responses import PlainTextResponse
 
@@ -62,6 +63,40 @@ def start(phone: str) -> str: return _link("", phone=phone)["connectUrl"]
 def redeem(phone: str, code: str) -> dict: return _link("/redeem", phone=phone, code=code)
 def token(phone: str) -> dict: return _link("/token", phone=phone)
 def revoke(phone: str) -> None: _link("/revoke", phone=phone)
+
+
+# ---- phone -> OkGhumo account binding ----
+def account_id(mcp_token: str | None) -> str | None:
+    """Who the minted MCP token belongs to (its `sub`). Read WITHOUT verifying: used only to notice that a number is now
+    linked to a different account, never to grant anything. None = can't tell (then we change nothing)."""
+    try:
+        sub = jwt.decode(mcp_token or "", options={"verify_signature": False}).get("sub")
+    except jwt.PyJWTError:
+        return None
+    return str(sub) if sub else None
+
+
+def wipe(phone: str) -> None:
+    """Forget everything we hold for this number: schedules, pending proposals, undelivered inbox rows, chat context."""
+    _hist.pop(phone, None)
+    for tbl in ("tasks", "proposals", "inbox"):
+        run(f"DELETE FROM {tbl} WHERE vendor_id=?", ("wa:" + phone,))
+
+
+def bind(phone: str, mcp_token: str | None) -> bool:
+    """Call whenever OkGhumo has just minted a token for this phone. If the number is now linked to a DIFFERENT account
+    than before (re-linked, recycled number), everything scheduled under the old account is wiped so the new owner never
+    receives reports or reminders somebody else set up. Returns False when it had to wipe."""
+    acct = account_id(mcp_token)
+    if not acct:
+        return True
+    row = run("SELECT account FROM wa_account WHERE phone=?", (phone,))
+    changed = bool(row) and row[0]["account"] != acct
+    if changed:
+        wipe(phone)
+        logs.event(log, "account_changed", logging.WARNING, phone=logs.mask_phone(phone))
+    run("INSERT OR REPLACE INTO wa_account(phone, account) VALUES(?,?)", (phone, acct))
+    return not changed
 
 
 # ---- sending ----
@@ -154,6 +189,7 @@ def _answer(phone: str, text: str, wamid: str, voice: bool = False) -> None:
     if not t.get("mcpAccessToken"):  # fail closed: no token, no model call
         logs.event(log, "message_denied", logging.ERROR, reason="no_mcp_token", phone=logs.mask_phone(phone))
         return send(phone, "The assistant isn't available right now. Please try again later.")
+    bind(phone, t["mcpAccessToken"])  # before anything reads this phone's schedules/proposals
     try:
         _graph({"status": "read", "message_id": wamid, "typing_indicator": {"type": "text"}})
     except Exception:
@@ -254,10 +290,9 @@ def _logout(phone: str) -> None:
         pass  # account no longer valid at OkGhumo: the link is dead anyway
     except httpx.HTTPError:
         return send(phone, "I couldn't log you out just now. Please try again in a minute.")
-    _hist.pop(phone, None)
     logs.event(log, "logout", phone=logs.mask_phone(phone), already=already or None)
-    for tbl in ("tasks", "proposals", "inbox"):  # logged out = no more messages to this number, no report text kept
-        run(f"DELETE FROM {tbl} WHERE vendor_id=?", ("wa:" + phone,))
+    wipe(phone)  # logged out = no more messages to this number, no report text kept
+    run("DELETE FROM wa_account WHERE phone=?", (phone,))
     send(phone, ("You're already logged out. " if already else "Logged out ✅ ") + "Send *hi* any time to connect again.")
 
 
@@ -278,9 +313,11 @@ _voice: dict[str, str] = {}  # wamid -> Meta media id of a voice note waiting to
 def _transcribe(phone: str, media_id: str) -> str | None:
     """Voice note -> text (echoed back so a mis-heard name or number is visible). None = vendor was told why not."""
     try:
-        if not allow(f"voice:{phone}", int(os.environ.get("RATE_WA_VOICE_PER_HOUR", 10)), 3600):
+        day = int(os.environ.get("RATE_WA_VOICE_PER_DAY", 15))
+        if not allow(f"voice:{phone}", day, 86400):  # per vendor (= phone), rolling 24 h; resets on restart (ratelimit.py)
             logs.event(log, "rate_limited", logging.WARNING, scope="wa_voice", phone=logs.mask_phone(phone))
-            send(phone, "That's a lot of voice notes this hour. Please type your question, or try again a little later.")
+            send(phone, f"You've reached today's limit of {day} voice notes. Please type your question; "
+                        "voice notes will work again within 24 hours.")
             return None
         text = voice.get_text(media_id)
     except voice.VoiceError as e:

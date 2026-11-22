@@ -24,6 +24,8 @@ CREATE TABLE IF NOT EXISTS inbox(
 CREATE TABLE IF NOT EXISTS wa_seen(id TEXT PRIMARY KEY, at REAL NOT NULL);  -- processed WhatsApp message ids
 CREATE TABLE IF NOT EXISTS proposals(  -- chat-proposed schedule awaiting the vendor's YES (one per vendor)
   vendor_id TEXT PRIMARY KEY, payload TEXT NOT NULL, created_at REAL NOT NULL);
+CREATE TABLE IF NOT EXISTS wa_account(  -- which OkGhumo account a WhatsApp number was last seen linked to
+  phone TEXT PRIMARY KEY, account TEXT NOT NULL);
 """
 
 # columns added after first release: CREATE IF NOT EXISTS can't alter an existing prod table

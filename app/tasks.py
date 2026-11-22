@@ -109,8 +109,8 @@ def list_tasks(claims: dict = Depends(current_user)):
 def patch_task(task_id: int, body: TaskPatch, claims: dict = Depends(current_user)):
     t = _task(claims["sub"], task_id)
     # resuming recomputes next_run_at so a long pause doesn't fire stale
-    run("UPDATE tasks SET status=?, fails=0, next_run_at=? WHERE id=?",
-        (body.status, iso(next_run(t["cron"], t["tz"], now())), task_id))
+    run("UPDATE tasks SET status=?, fails=0, next_run_at=? WHERE id=? AND vendor_id=?",
+        (body.status, iso(next_run(t["cron"], t["tz"], now())), task_id, claims["sub"]))
     logs.event(log, "task_status", vendor=logs.mask_id(claims["sub"]), task=task_id, status=body.status)
     return dict(_task(claims["sub"], task_id))
 
@@ -118,7 +118,7 @@ def patch_task(task_id: int, body: TaskPatch, claims: dict = Depends(current_use
 @router.delete("/tasks/{task_id}", status_code=204)
 def delete_task(task_id: int, claims: dict = Depends(current_user)):
     _task(claims["sub"], task_id)
-    run("DELETE FROM tasks WHERE id=?", (task_id,))
+    run("DELETE FROM tasks WHERE id=? AND vendor_id=?", (task_id, claims["sub"]))
     logs.event(log, "task_deleted", vendor=logs.mask_id(claims["sub"]), task=task_id)
 
 

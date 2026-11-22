@@ -50,6 +50,8 @@ def _generate(t: dict) -> str:
             tk = whatsapp.token(t["vendor_id"][3:])
             if tk.get("role") not in whatsapp.ROLES or not tk.get("mcpAccessToken"):
                 raise Unlinked("")
+            if not whatsapp.bind(t["vendor_id"][3:], tk["mcpAccessToken"]):
+                raise Unlinked("")  # number now belongs to another account: its old schedules were just wiped, send nothing
             token = tk["mcpAccessToken"]
         else:
             token = mcp_auth.mcp_token(t["vendor_id"])
@@ -82,7 +84,7 @@ def run_report(inbox_id: int, t: dict) -> None:
     if fails >= MAX_FAILS:
         body += "\nThis report has been paused after repeated failures. You can resume it once things are fixed."
     run("UPDATE inbox SET body=? WHERE id=? AND vendor_id=?", (body, inbox_id, t["vendor_id"]))
-    run("UPDATE tasks SET fails=?, status=CASE WHEN ?>=? THEN 'paused' ELSE status END WHERE id=?",
-        (fails, fails, MAX_FAILS, t["id"]))
+    run("UPDATE tasks SET fails=?, status=CASE WHEN ?>=? THEN 'paused' ELSE status END WHERE id=? AND vendor_id=?",
+        (fails, fails, MAX_FAILS, t["id"], t["vendor_id"]))
     if not silent:
         whatsapp.deliver(inbox_id, t["vendor_id"], t["name"], body)  # no-op for non-WhatsApp vendors

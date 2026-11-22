@@ -435,10 +435,19 @@ def test_voice_off_without_key_or_with_kill_switch(vox, monkeypatch):
     assert len(vox.stt_calls) == 0
 
 
-def test_voice_hourly_limit_stops_before_download(vox, monkeypatch):
-    monkeypatch.setenv("RATE_WA_VOICE_PER_HOUR", "1")
-    post("", typ="audio"); post("", typ="audio")
-    assert len(vox.stt_calls) == 1 and "lot of voice notes" in said(vox)[-1]
+def test_voice_daily_limit_is_per_phone_and_stops_before_download(vox, monkeypatch):
+    monkeypatch.setenv("RATE_WA_VOICE_PER_DAY", "2")
+    vox.tokens["919800000002"] = {"role": "vendor", "mcpAccessToken": "t2"}
+    for _ in range(3): post("", typ="audio")
+    assert len(vox.stt_calls) == 2 and "limit of 2 voice notes" in said(vox)[-1]
+    n = len(vox.stt_calls)
+    post("", typ="audio", phone="919800000002")  # another vendor still has their own 15
+    assert len(vox.stt_calls) == n + 1
+
+
+def test_voice_default_daily_limit_is_15(vox):
+    for _ in range(16): post("", typ="audio")
+    assert len(vox.stt_calls) == 15 and "limit of 15 voice notes" in said(vox)[-1]
 
 
 def test_long_voice_transcript_passes_guard_but_typed_long_text_does_not(vox):

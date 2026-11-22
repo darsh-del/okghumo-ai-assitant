@@ -22,4 +22,7 @@ def current_user(creds: HTTPAuthorizationCredentials = Depends(bearer)) -> dict:
         logs.event(log, "auth_failed", logging.WARNING, reason="no_subject")
         raise HTTPException(401, "token has no subject")
     claims["sub"] = str(claims["sub"])
+    if claims["sub"].startswith("wa:"):  # "wa:<phone>" is the WhatsApp namespace: an app vendor must never be able to enter it
+        logs.event(log, "auth_failed", logging.WARNING, reason="reserved_subject")
+        raise HTTPException(401, "invalid token")
     return claims
