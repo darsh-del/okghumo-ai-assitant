@@ -21,7 +21,7 @@ import httpx
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from fastapi.responses import PlainTextResponse
 
-from app import assistant, guard, lang, logs, ratelimit, sanitize, schedules
+from app import assistant, guard, lang, logs, ratelimit, sanitize, schedules, voice
 from app.db import connect, run
 
 log = logging.getLogger("whatsapp")
@@ -135,7 +135,7 @@ def _redeem(phone: str, code: str) -> None:
     send(phone, "Connected ✅ Ask me about your sales, bookings and collections. Send *STOP* to unlink.")
 
 
-def _answer(phone: str, text: str, wamid: str) -> None:
+def _answer(phone: str, text: str, wamid: str, voice: bool = False) -> None:
     if not allow(f"burst:{phone}", int(os.environ.get("RATE_WA_PER_MIN", 6)), 60):  # fast spam: no token mint, no model
         logs.event(log, "rate_limited", logging.WARNING, scope="wa_msg", window="min", phone=logs.mask_phone(phone))
         return send(phone, lang.reply("rate_limited", text))
@@ -159,14 +159,19 @@ def _answer(phone: str, text: str, wamid: str) -> None:
     except Exception:
         pass  # cosmetic
     vendor, msgs = "wa:" + phone, _messages(phone) + [{"role": "user", "content": text}]  # own namespace per phone
-    done = schedules.intercept(vendor, t["role"], msgs, where="here on WhatsApp")  # YES/NO to OUR prompt: code, no model
+    if voice:  # a mis-heard word must never confirm or cancel anything: only TYPED yes/no acts on a proposal
+        if len(msgs) > 1 and schedules.MARK in msgs[-2]["content"] and schedules._norm(text) in schedules.YES | schedules.NO:
+            return send(phone, "For safety, please type YES or NO as text to confirm.")  # history untouched: typed reply still works
+        done = None
+    else:
+        done = schedules.intercept(vendor, t["role"], msgs, where="here on WhatsApp")  # YES/NO to OUR prompt: code, no model
     if done is not None:
         logs.event(log, "wa_reply", phone=logs.mask_phone(phone), source="confirmation", model_called=False)
         _remember(phone, msgs + [{"role": "assistant", "content": done}])
         return send(phone, done)
     if flush(phone) and len(text) <= 10:  # a ping that only opened the 24h window: reports are enough
         return
-    blocked = guard.classify(msgs)  # off-topic / injection / oversized / greeting: canned polite reply, no model call
+    blocked = guard.classify(msgs, guard.VOICE_MAX_CHARS if voice else guard.MAX_MSG_CHARS)  # off-topic / injection / oversized / greeting: canned polite reply, no model call
     if blocked:
         logs.event(log, "wa_reply", phone=logs.mask_phone(phone), source="guard", reason=blocked[0], model_called=False)
         _remember(phone, msgs + [{"role": "assistant", "content": blocked[1]}])
@@ -267,6 +272,33 @@ def _is_command(t: str | None) -> bool:
     return is_logout(t) or (t.upper().startswith("LINK-") and " " not in t)
 
 
+_voice: dict[str, str] = {}  # wamid -> Meta media id of a voice note waiting to be transcribed
+
+
+def _transcribe(phone: str, media_id: str) -> str | None:
+    """Voice note -> text (echoed back so a mis-heard name or number is visible). None = vendor was told why not."""
+    try:
+        if not allow(f"voice:{phone}", int(os.environ.get("RATE_WA_VOICE_PER_HOUR", 10)), 3600):
+            logs.event(log, "rate_limited", logging.WARNING, scope="wa_voice", phone=logs.mask_phone(phone))
+            send(phone, "That's a lot of voice notes this hour. Please type your question, or try again a little later.")
+            return None
+        text = voice.get_text(media_id)
+    except voice.VoiceError as e:
+        logs.event(log, "voice", logging.WARNING, phone=logs.mask_phone(phone), outcome=e.kind)
+        msg = {"too_long": "That voice note is too long for me. Please keep it under 2 minutes, or type your question.",
+               "empty": "I couldn't hear anything in that voice note. Please try again or type your question."}.get(
+                   e.kind, "Sorry, I couldn't process that voice note. Please try again or type your question.")
+        send(phone, msg)
+        return None
+    except Exception as e:
+        logs.event(log, "voice", logging.ERROR, phone=logs.mask_phone(phone), outcome="error", error=type(e).__name__)
+        send(phone, "Sorry, I couldn't process that voice note. Please try again or type your question.")
+        return None
+    logs.event(log, "voice", phone=logs.mask_phone(phone), outcome="ok", chars=len(text))  # never the text itself
+    send(phone, "🎙 I heard: " + text)
+    return text
+
+
 def enqueue(phone: str, text: str | None, wamid: str) -> None:
     with _plock:
         _pending.setdefault(phone, []).append((text, wamid))
@@ -285,25 +317,36 @@ def process(phone: str) -> None:
             return
         if len(batch) > 1:
             logs.event(log, "wa_coalesced", phone=logs.mask_phone(phone), count=len(batch))
-        if any(_is_command(t) for t, _ in batch):  # STOP / LINK-code must stay whole messages
-            for t, w in batch:
-                handle(phone, t, w)
+        items = []  # (text, wamid, came_from_voice)
+        for t, w in batch:
+            if w in _voice:
+                t = _transcribe(phone, _voice.pop(w))
+                if t is None:
+                    continue  # the vendor was already told what went wrong
+                items.append((t, w, True))
+            else:
+                items.append((t, w, False))
+        if not items:
             return
-        texts = [t for t, _ in batch if t is not None]
-        handle(phone, "\n".join(texts) if texts else None, batch[-1][1])
+        if any(_is_command(t) for t, _, v in items if not v):  # STOP / LINK-code must stay whole TYPED messages
+            for t, w, v in items:
+                handle(phone, t, w, v)
+            return
+        texts = [t for t, _, _ in items if t is not None]
+        handle(phone, "\n".join(texts) if texts else None, items[-1][1], any(v for _, _, v in items))
 
 
-def handle(phone: str, text: str | None, wamid: str) -> None:
+def handle(phone: str, text: str | None, wamid: str, voice: bool = False) -> None:
     try:
         t = (text or "").strip()
         if text is None:
             send(phone, "I can only read text messages for now.")
-        elif is_logout(t):
+        elif is_logout(t) and not voice:  # commands are typed only: speech-to-text can mishear
             _logout(phone)
-        elif t.upper().startswith("LINK-") and " " not in t:
+        elif t.upper().startswith("LINK-") and " " not in t and not voice:
             _redeem(phone, t)  # phone comes from the signed webhook, never from the text
         else:
-            _answer(phone, t, wamid)
+            _answer(phone, t, wamid, voice)
     except Exception as e:  # never leak details to the user; type only in the log
         logs.event(log, "handler_failed", logging.ERROR, phone=logs.mask_phone(phone), error=type(e).__name__)
         try:
@@ -341,6 +384,8 @@ async def receive(request: Request, bg: BackgroundTasks):
                 for m in v.get("messages", []):
                     if _first_seen(m["id"]):
                         logs.event(log, "wa_message", phone=logs.mask_phone(m["from"]), type=m.get("type"))
+                        if m.get("type") == "audio" and voice.enabled():
+                            _voice[m["id"]] = m["audio"]["id"]
                         enqueue(m["from"], m["text"]["body"] if m.get("type") == "text" else None, m["id"])
                         bg.add_task(process, m["from"])
     except (ValueError, KeyError, AttributeError, TypeError):

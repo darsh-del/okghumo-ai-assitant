@@ -38,4 +38,4 @@ def test_greeting_and_thanks_canned():
 def test_trim_caps_history():
     msgs = [{"role": "assistant" if i % 2 else "user", "content": "a" * 5000} for i in range(30)]
     out = guard.trim(msgs)
-    assert len(out) <= guard.MAX_HISTORY and out[0]["role"] == "user" and all(len(m["content"]) == 2000 for m in out)
+    assert len(out) <= guard.MAX_HISTORY and out[0]["role"] == "user" and all(len(m["content"]) == guard.MAX_HISTORY_CHARS for m in out)

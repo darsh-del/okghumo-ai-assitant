@@ -6,9 +6,10 @@ import re
 
 from app import lang
 
-MAX_MSG_CHARS = 1000  # latest user message
+MAX_MSG_CHARS = 1000  # latest user message (typed)
+VOICE_MAX_CHARS = 2500  # a 150 s voice note transcribes to ~2000+ characters
 MAX_HISTORY = 10  # messages kept per request (client sends full history; unbounded = unbounded cost)
-MAX_HISTORY_CHARS = 2000  # per message in that history
+MAX_HISTORY_CHARS = 2500  # per message in that history
 
 # words that mean "this is about the vendor's business": always allowed through
 DOMAIN = re.compile(
@@ -37,11 +38,11 @@ THANKS = re.compile(
     r"(thanks?( you)?|thank u|thx|shukriya|dhanyavaad|dhanyavad|aabhar|great|awesome|perfect|bye|goodbye)[\s!.]*", re.I)
 
 
-def classify(messages: list[dict]) -> tuple[str, str] | None:
+def classify(messages: list[dict], max_chars: int = MAX_MSG_CHARS) -> tuple[str, str] | None:
     """(reason, polite canned reply in the vendor's language) if the LATEST user message must not reach the model,
     else None. reason is for logs: too_long | greeting | thanks | injection | off_topic."""
     text = messages[-1]["content"].strip()
-    if len(text) > MAX_MSG_CHARS:
+    if len(text) > max_chars:
         return "too_long", lang.reply("too_long", text)
     if GREETING.fullmatch(text):
         return "greeting", lang.reply("hello", text)

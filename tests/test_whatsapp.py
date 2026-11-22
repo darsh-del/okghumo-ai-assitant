@@ -48,6 +48,7 @@ def env(monkeypatch):
 def post(text, phone="919800000001", wamid=None, sign=True, pn="pn1", typ="text"):
     msg = {"id": wamid or f"wamid{next(ids)}", "from": phone, "type": typ}
     if typ == "text": msg["text"] = {"body": text}
+    if typ == "audio": msg["audio"] = {"id": "media1", "mime_type": "audio/ogg; codecs=opus", "voice": True}
     raw = json.dumps({"entry": [{"changes": [{"value": {"metadata": {"phone_number_id": pn}, "messages": [msg]}}]}]}).encode()
     sig = "sha256=" + hmac.new(b"appsecret", raw, hashlib.sha256).hexdigest()
     return c.post("/whatsapp/webhook", content=raw, headers={"X-Hub-Signature-256": sig if sign else "sha256=bad"})
@@ -363,9 +364,100 @@ def test_quick_messages_are_answered_as_one_question(env):
     w.enqueue("919800000001", "kya hal chal kesa chal raha he dhandha", "w1")
     w.enqueue("919800000001", "?", "w2")
     seen = []
-    orig, w.handle = w.handle, lambda p, t, i: seen.append((t, i))
+    orig, w.handle = w.handle, lambda p, t, i, v=False: seen.append((t, i))
     try:
         w.process("919800000001"); w.process("919800000001")  # second task finds nothing left
     finally:
         w.handle = orig
     assert seen == [("kya hal chal kesa chal raha he dhandha\n?", "w2")]
+
+
+# ---- voice notes ----
+@pytest.fixture
+def vox(env, monkeypatch):
+    """Voice on, linked vendor, STT faked (no network). vox.say = what the 'speech-to-text' returns."""
+    from app import voice
+    env.tokens["919800000001"] = {"role": "vendor", "mcpAccessToken": "t"}
+    monkeypatch.setenv("STT_API_KEY", "k")
+    env.say, env.stt_calls = "how many bookings today", []
+    def fake(media_id):
+        env.stt_calls.append(media_id)
+        if isinstance(env.say, Exception): raise env.say
+        return env.say
+    monkeypatch.setattr(voice, "get_text", fake)
+    return env
+
+
+def test_voice_note_is_echoed_then_answered_like_text(vox):
+    post("", typ="audio")
+    assert said(vox) == ["🎙 I heard: how many bookings today", "answer"]
+    assert vox.model.calls[0]["messages"][-1]["content"] == "how many bookings today"
+
+
+def test_voice_stop_and_link_code_are_not_commands(vox):
+    for spoken in ("stop", "logout", "LINK-abc123"):
+        vox.say = spoken
+        post("", typ="audio")
+    assert vox.revoked == [] and vox.redeemed == []
+
+
+def test_voice_yes_never_confirms_a_proposal(vox):
+    from app import schedules
+    w._remember("919800000001", [{"role": "user", "content": "remind me daily"},
+                                 {"role": "assistant", "content": "Every day 9am. " + schedules.MARK}])
+    vox.say = "yes"
+    post("", typ="audio")
+    assert "type YES or NO" in said(vox)[-1] and not vox.model.calls
+    post("yes")  # the typed answer still works afterwards (history was left alone)
+    assert "expired" in said(vox)[-1] or "Done" in said(vox)[-1]
+
+
+@pytest.mark.parametrize("err,frag", [("too_long", "too long"), ("empty", "couldn't hear"), ("failed", "couldn't process")])
+def test_voice_failures_get_a_friendly_reply_and_no_model_call(vox, err, frag):
+    from app import voice
+    vox.say = voice.VoiceError(err)
+    post("", typ="audio")
+    assert frag in said(vox)[-1] and not vox.model.calls
+
+
+def test_voice_unexpected_error_is_generic(vox):
+    vox.say = RuntimeError("boom secret")
+    post("", typ="audio")
+    assert "couldn't process" in said(vox)[-1] and "boom" not in said(vox)[-1] and not vox.model.calls
+
+
+def test_voice_off_without_key_or_with_kill_switch(vox, monkeypatch):
+    monkeypatch.delenv("STT_API_KEY")
+    post("", typ="audio")
+    assert said(vox) == ["I can only read text messages for now."] and not vox.stt_calls
+    monkeypatch.setenv("STT_API_KEY", "k"); monkeypatch.setenv("VOICE_ENABLED", "0")
+    post("", typ="audio")
+    assert len(vox.stt_calls) == 0
+
+
+def test_voice_hourly_limit_stops_before_download(vox, monkeypatch):
+    monkeypatch.setenv("RATE_WA_VOICE_PER_HOUR", "1")
+    post("", typ="audio"); post("", typ="audio")
+    assert len(vox.stt_calls) == 1 and "lot of voice notes" in said(vox)[-1]
+
+
+def test_long_voice_transcript_passes_guard_but_typed_long_text_does_not(vox):
+    vox.say = "bookings " * 250  # ~2250 chars
+    post("", typ="audio")
+    assert vox.model.calls
+    vox.model.calls.clear()
+    post("bookings " * 250)
+    assert not vox.model.calls
+
+
+def test_ogg_seconds_and_too_long_is_rejected_before_stt(monkeypatch):
+    from app import voice
+    ogg = lambda sec: b"OggS\x00\x04" + int(sec * 48000).to_bytes(8, "little") + b"\x00" * 20
+    assert voice.ogg_seconds(ogg(10)) == 10.0 and voice.ogg_seconds(b"junk") is None
+    monkeypatch.setattr(voice, "fetch", lambda m: ogg(200))
+    monkeypatch.setattr(voice, "transcribe", lambda a: pytest.fail("must not be billed"))
+    with pytest.raises(voice.VoiceError) as e: voice.get_text("m")
+    assert e.value.kind == "too_long"
+    monkeypatch.setattr(voice, "fetch", lambda m: ogg(30)); monkeypatch.setattr(voice, "transcribe", lambda a: "")
+    with pytest.raises(voice.VoiceError) as e: voice.get_text("m")
+    assert e.value.kind == "empty"
