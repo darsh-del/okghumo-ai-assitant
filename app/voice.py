@@ -48,15 +48,16 @@ def fetch(media_id: str) -> bytes:
 
 
 def transcribe(audio: bytes) -> str:
+    model = os.environ.get("STT_MODEL", "gpt-4o-mini-transcribe")  # tested faster/cheaper than whisper-1, better Hindi
     try:
         r = httpx.post("https://api.openai.com/v1/audio/transcriptions", timeout=60,
                        headers={"Authorization": "Bearer " + os.environ["STT_API_KEY"]},
-                       data={"model": os.environ.get("STT_MODEL", "whisper-1"), "response_format": "verbose_json"},
+                       data={"model": model, **({"response_format": "verbose_json"} if model == "whisper-1" else {})},
                        files={"file": ("voice.ogg", audio, "audio/ogg")})
         r.raise_for_status()
         j = r.json()
-        segs = j.get("segments") or []
-        if segs and all(x.get("no_speech_prob", 0) > 0.6 for x in segs):  # Whisper invents words ("you") for silence
+        segs = j.get("segments") or []  # only whisper-1 returns these
+        if segs and all(x.get("no_speech_prob", 0) > 0.6 for x in segs):  # whisper-1 invents words ("you") for silence
             return ""
         return (j.get("text") or "").strip()
     except (httpx.HTTPError, ValueError) as e:

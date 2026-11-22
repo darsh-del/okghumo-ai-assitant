@@ -310,7 +310,9 @@ def process(phone: str) -> None:
     with _plock:
         lock = _locks.setdefault(phone, threading.Lock())
     with lock:  # a second task for the same phone waits here, then finds nothing left to do
-        time.sleep(float(os.environ.get("WA_DEBOUNCE_S", 5)))
+        with _plock:
+            has_voice = any(w in _voice for _, w in _pending.get(phone, []))
+        time.sleep(0 if has_voice else float(os.environ.get("WA_DEBOUNCE_S", 5)))  # a voice note is a whole thought: no wait
         with _plock:
             batch = _pending.pop(phone, [])
         if not batch:

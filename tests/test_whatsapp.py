@@ -465,7 +465,7 @@ def test_ogg_seconds_and_too_long_is_rejected_before_stt(monkeypatch):
 
 def test_silence_from_whisper_counts_as_empty(monkeypatch):
     from app import voice
-    monkeypatch.setenv("STT_API_KEY", "k")
+    monkeypatch.setenv("STT_API_KEY", "k"); monkeypatch.setenv("STT_MODEL", "whisper-1")
     class R:
         def raise_for_status(self): pass
         def json(self): return {"text": "you", "segments": [{"no_speech_prob": 0.9}]}
@@ -473,3 +473,16 @@ def test_silence_from_whisper_counts_as_empty(monkeypatch):
     assert voice.transcribe(b"x") == ""
     R.json = lambda self: {"text": " hello ", "segments": [{"no_speech_prob": 0.1}]}
     assert voice.transcribe(b"x") == "hello"
+
+
+def test_voice_note_skips_the_typing_wait_but_text_still_waits(env, monkeypatch):
+    waits = []
+    monkeypatch.setattr(w.time, "sleep", lambda s: waits.append(s))
+    monkeypatch.setenv("WA_DEBOUNCE_S", "5")
+    monkeypatch.setattr(w, "handle", lambda *a, **k: None)
+    w._pending.clear(); w._voice.clear()
+    w.enqueue("919800000001", "hello", "t1"); w.process("919800000001")
+    w._voice["v1"] = "m"; w.enqueue("919800000001", None, "v1")
+    monkeypatch.setattr(w, "_transcribe", lambda p, m: "text")
+    w.process("919800000001")
+    assert waits == [5.0, 0]
