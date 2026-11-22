@@ -51,10 +51,14 @@ def transcribe(audio: bytes) -> str:
     try:
         r = httpx.post("https://api.openai.com/v1/audio/transcriptions", timeout=60,
                        headers={"Authorization": "Bearer " + os.environ["STT_API_KEY"]},
-                       data={"model": os.environ.get("STT_MODEL", "whisper-1")},
+                       data={"model": os.environ.get("STT_MODEL", "whisper-1"), "response_format": "verbose_json"},
                        files={"file": ("voice.ogg", audio, "audio/ogg")})
         r.raise_for_status()
-        return (r.json().get("text") or "").strip()
+        j = r.json()
+        segs = j.get("segments") or []
+        if segs and all(x.get("no_speech_prob", 0) > 0.6 for x in segs):  # Whisper invents words ("you") for silence
+            return ""
+        return (j.get("text") or "").strip()
     except (httpx.HTTPError, ValueError) as e:
         raise VoiceError("failed") from e
 

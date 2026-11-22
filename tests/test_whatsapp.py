@@ -461,3 +461,15 @@ def test_ogg_seconds_and_too_long_is_rejected_before_stt(monkeypatch):
     monkeypatch.setattr(voice, "fetch", lambda m: ogg(30)); monkeypatch.setattr(voice, "transcribe", lambda a: "")
     with pytest.raises(voice.VoiceError) as e: voice.get_text("m")
     assert e.value.kind == "empty"
+
+
+def test_silence_from_whisper_counts_as_empty(monkeypatch):
+    from app import voice
+    monkeypatch.setenv("STT_API_KEY", "k")
+    class R:
+        def raise_for_status(self): pass
+        def json(self): return {"text": "you", "segments": [{"no_speech_prob": 0.9}]}
+    monkeypatch.setattr(voice.httpx, "post", lambda *a, **k: R())
+    assert voice.transcribe(b"x") == ""
+    R.json = lambda self: {"text": " hello ", "segments": [{"no_speech_prob": 0.1}]}
+    assert voice.transcribe(b"x") == "hello"
