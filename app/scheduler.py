@@ -4,17 +4,19 @@ Polls the tasks table; due reminders become inbox rows. Due reports get a placeh
 UNIQUE(task_id, scheduled_for)) that a worker thread fills in via app.runner. Missed runs (downtime) fire once,
 not once per missed slot. Set SCHEDULER_ENABLED=0 to stop firing.
 """
+import logging
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from datetime import datetime
 
-from app import whatsapp
+from app import logs, whatsapp
 from app.db import connect
 from app.runner import run_report
 from app.tasks import iso, next_run, now
 
+log = logging.getLogger("scheduler")
 PENDING = "⏳ Preparing your report…"
 
 
@@ -41,18 +43,22 @@ def tick(at: datetime | None = None, submit=None) -> int:
         c.execute("COMMIT")
     for job in jobs:  # after COMMIT: slow model calls never hold the DB write lock
         submit(*job)
+    if fired:
+        logs.event(log, "tick", fired=fired, report_jobs=sum(j[0] is run_report for j in jobs))
     return fired
 
 
 def main() -> None:
     # ponytail: a crash mid-report leaves the placeholder row; add a stale-placeholder sweep if it ever matters
+    logs.setup()
+    logs.event(log, "scheduler_started", enabled=os.environ.get("SCHEDULER_ENABLED", "1"))
     pool = ThreadPoolExecutor(max_workers=4)
     while True:
         if os.environ.get("SCHEDULER_ENABLED", "1") == "1":
             try:
                 tick(submit=pool.submit)
             except Exception as e:  # keep the loop alive; log type only (no task text)
-                print("tick failed:", type(e).__name__, flush=True)
+                logs.event(log, "tick_failed", logging.ERROR, error=type(e).__name__)
         time.sleep(30)
 
 

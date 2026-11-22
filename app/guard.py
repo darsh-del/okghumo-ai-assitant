@@ -4,6 +4,8 @@ ambiguous passes through and the SYSTEM prompt's scope rules are the second laye
 """
 import re
 
+from app import lang
+
 MAX_MSG_CHARS = 1000  # latest user message
 MAX_HISTORY = 10  # messages kept per request (client sends full history; unbounded = unbounded cost)
 MAX_HISTORY_CHARS = 2000  # per message in that history
@@ -28,34 +30,33 @@ INJECTION = re.compile(
     r"(reveal|show|print|repeat|tell me) (me )?(your|the) (system |initial |hidden )?(prompt|instructions)|"
     r"system prompt|developer mode|jailbreak|\bdan mode\b|you are now", re.I)
 
-GREETING = re.compile(r"(hi+|hello+|hey+|namaste|namaskar|good (morning|afternoon|evening)|hii+|helo)[\s!.]*", re.I)
-THANKS = re.compile(r"(thanks?( you)?|thank u|thx|shukriya|dhanyavaad|dhanyavad|great|awesome|perfect|bye|goodbye)[\s!.]*", re.I)
+GREETING = re.compile(
+    r"(hi+|hello+|hey+|helo|namaste|namaskar|ram ram|jai shree krishna|jsk|kem cho|kem chho|good (morning|afternoon|evening))[\s!.]*",
+    re.I)
+THANKS = re.compile(
+    r"(thanks?( you)?|thank u|thx|shukriya|dhanyavaad|dhanyavad|aabhar|great|awesome|perfect|bye|goodbye)[\s!.]*", re.I)
 
-HELLO = ("Hello! 😊 I'm the Okghumo assistant. I can help with your sales, bookings, agent balances and collections, "
-         "and set up reminders or reports. What would you like to know?")
-WELCOME = "You're most welcome! 😊 Please ask any time you need anything about your Okghumo account."
-OFF = ("Thank you for asking! I'm sorry, but I can only help with your Okghumo account: sales, bookings, agent "
-       "balances, collections, and reminders or reports. Is there anything about those I can help you with? 😊")
-INJ = ("Thank you for your message. I'm sorry, but I'm not able to help with that. I'm happy to help with your "
-       "Okghumo sales, bookings, agents or collections though. 😊")
-LONG = ("Thank you for your message! It's a little long for me to work with. Could you please send a shorter "
-        "question about your Okghumo account? 😊")
+
+def classify(messages: list[dict]) -> tuple[str, str] | None:
+    """(reason, polite canned reply in the vendor's language) if the LATEST user message must not reach the model,
+    else None. reason is for logs: too_long | greeting | thanks | injection | off_topic."""
+    text = messages[-1]["content"].strip()
+    if len(text) > MAX_MSG_CHARS:
+        return "too_long", lang.reply("too_long", text)
+    if GREETING.fullmatch(text):
+        return "greeting", lang.reply("hello", text)
+    if THANKS.fullmatch(text):
+        return "thanks", lang.reply("thanks", text)
+    if INJECTION.search(text):
+        return "injection", lang.reply("injection", text)
+    if OFFTOPIC.search(text) and not DOMAIN.search(text):
+        return "off_topic", lang.reply("off_topic", text)
+    return None
 
 
 def check(messages: list[dict]) -> str | None:
-    """Canned polite reply if the LATEST user message should not reach the model, else None (continue)."""
-    text = messages[-1]["content"].strip()
-    if len(text) > MAX_MSG_CHARS:
-        return LONG
-    if GREETING.fullmatch(text):
-        return HELLO
-    if THANKS.fullmatch(text):
-        return WELCOME
-    if INJECTION.search(text):
-        return INJ
-    if OFFTOPIC.search(text) and not DOMAIN.search(text):
-        return OFF
-    return None
+    r = classify(messages)
+    return r[1] if r else None
 
 
 def trim(messages: list[dict]) -> list[dict]:

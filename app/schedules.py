@@ -11,6 +11,7 @@ SECURITY MODEL (read before changing anything):
 Nothing here touches the Okghumo MCP; these tools only write this app's own sqlite DB.
 """
 import json
+import logging
 import os
 import re
 import time
@@ -20,10 +21,12 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import HTTPException
 
+from app import logs
 from app.db import run
 from app.rbac import ROLE_TOOLS
 from app.tasks import add_task, check_task
 
+log = logging.getLogger("schedules")
 MARK = "Reply YES to confirm or NO to cancel."  # only code appends this; the model's copy is stripped
 TTL = 900  # seconds a proposal stays confirmable
 DAYS = {"mon": "Monday", "tue": "Tuesday", "wed": "Wednesday", "thu": "Thursday", "fri": "Friday",
@@ -150,6 +153,8 @@ class Scheduling:
         run("INSERT OR REPLACE INTO proposals(vendor_id,payload,created_at) VALUES(?,?,?)",
             (self.vendor, json.dumps(payload), time.time()))
         self.note = payload["summary"] + "\n\n" + MARK
+        logs.event(log, "proposal_saved", vendor=logs.mask_id(self.vendor), action=payload["action"],
+                   kind=payload.get("kind"))
         return ("Pending proposal saved. NOT scheduled yet. Reply with ONE short lead-in line only; the system "
                 "appends the details and the YES/NO prompt. Do not claim it is scheduled.")
 
@@ -205,8 +210,10 @@ def intercept(vendor: str, role: str | None, messages: list[dict], where: str = 
         return None  # e.g. "make it 9am": goes to the model, which may propose again
     rows = run("DELETE FROM proposals WHERE vendor_id=? RETURNING payload, created_at", (vendor,))  # one-shot
     if not rows or time.time() - rows[0]["created_at"] > TTL:
+        logs.event(log, "proposal_expired", vendor=logs.mask_id(vendor))
         return "That confirmation has expired, so nothing was changed. Just tell me again what you'd like and I'll set it up."
     if not yes:
+        logs.event(log, "proposal_declined", vendor=logs.mask_id(vendor))
         return "No problem, I haven't changed anything."
     p = json.loads(rows[0]["payload"])
     try:
@@ -214,11 +221,13 @@ def intercept(vendor: str, role: str | None, messages: list[dict], where: str = 
             if not run("SELECT 1 FROM tasks WHERE id=? AND vendor_id=?", (p["task_id"], vendor)):
                 return "That schedule no longer exists, so there's nothing to cancel."
             run("DELETE FROM tasks WHERE id=? AND vendor_id=?", (p["task_id"], vendor))
+            logs.event(log, "task_cancelled", vendor=logs.mask_id(vendor), task=p["task_id"])
             return "Cancelled ✅"
         if role not in ROLE_TOOLS:
             return "Sorry, your account can't use this feature."
         t = add_task(vendor, p["name"], p["text"], p["cron"], p["tz"], p["kind"], role)
     except HTTPException as e:
+        logs.event(log, "proposal_failed", logging.WARNING, vendor=logs.mask_id(vendor), status=e.status_code)
         return f"Sorry, I couldn't set that up: {e.detail}."
     nxt = datetime.fromisoformat(t["next_run_at"]).astimezone(ZoneInfo(p["tz"])).strftime("%a %d %b, %H:%M")
     return f"Done ✅ {p['summary'].splitlines()[0]}\nFirst one: {nxt}. You'll get it {where}."

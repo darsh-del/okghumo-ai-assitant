@@ -3,6 +3,7 @@
 Every query is filtered by the vendor id from the verified JWT. Reports with data come in Phase 2
 (SCHEDULING_ROADMAP.md).
 """
+import logging
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -10,10 +11,12 @@ from croniter import croniter
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
+from app import logs
 from app.auth import current_user
 from app.db import run
 
 router = APIRouter()
+log = logging.getLogger("tasks")
 MAX_TASKS = 10  # per vendor, any status
 MIN_GAP_S = 3600  # no reminder may fire more than once an hour
 REPORT_GAP_S = 20 * 3600  # reports cost a model call: at most daily (20h tolerates DST shifts)
@@ -83,11 +86,13 @@ def add_task(v: str, name: str, message: str, cron: str, tz: str, kind: str = "r
     """The one place a task row is created (API and chat-confirmed)."""
     check_task(v, message, cron, tz, kind)
     n = now()
-    return dict(run(
+    t = dict(run(
         "INSERT INTO tasks(vendor_id,name,message,cron,tz,kind,role,next_run_at,created_at) "
         "VALUES(?,?,?,?,?,?,?,?,?) RETURNING *",
         (v, name, message, cron, tz, kind, role, iso(next_run(cron, tz, n)), iso(n)),
     )[0])
+    logs.event(log, "task_created", vendor=logs.mask_id(v), task=t["id"], kind=kind, cron=cron, tz=tz)
+    return t
 
 
 @router.post("/tasks", status_code=201)
@@ -106,6 +111,7 @@ def patch_task(task_id: int, body: TaskPatch, claims: dict = Depends(current_use
     # resuming recomputes next_run_at so a long pause doesn't fire stale
     run("UPDATE tasks SET status=?, fails=0, next_run_at=? WHERE id=?",
         (body.status, iso(next_run(t["cron"], t["tz"], now())), task_id))
+    logs.event(log, "task_status", vendor=logs.mask_id(claims["sub"]), task=task_id, status=body.status)
     return dict(_task(claims["sub"], task_id))
 
 
@@ -113,6 +119,7 @@ def patch_task(task_id: int, body: TaskPatch, claims: dict = Depends(current_use
 def delete_task(task_id: int, claims: dict = Depends(current_user)):
     _task(claims["sub"], task_id)
     run("DELETE FROM tasks WHERE id=?", (task_id,))
+    logs.event(log, "task_deleted", vendor=logs.mask_id(claims["sub"]), task=task_id)
 
 
 @router.get("/inbox")

@@ -7,12 +7,13 @@ or send anything; output goes only to the task owner's inbox row; no retries/fal
 """
 import logging
 import os
+import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
 import httpx
 
-from app import assistant, mcp_auth, whatsapp
+from app import assistant, logs, mcp_auth, whatsapp
 from app.credentials import NoCredential
 from app.db import run
 from app.rbac import mcp_toolset
@@ -66,15 +67,18 @@ def _generate(t: dict) -> str:
 
 def run_report(inbox_id: int, t: dict) -> None:
     """Fill the placeholder inbox row. Never raises (a worker thread has nobody to catch it)."""
-    ok, silent = True, False
+    ok, silent, t0 = True, False, time.time()
     try:
         body = _generate(t)
     except Failed as e:
         ok, body, silent = False, str(e), e.silent
     except Exception as e:
-        log.error("report run failed: %s", type(e).__name__)
+        logs.event(log, "report_error", logging.ERROR, task=t["id"], error=type(e).__name__)
         ok, body = False, "Sorry, I couldn't prepare this report this time. I'll try again at the next scheduled time."
     fails = 0 if ok else (MAX_FAILS if silent else t["fails"] + 1)
+    logs.event(log, "report_run", logging.INFO if ok else logging.WARNING, task=t["id"],
+               vendor=logs.mask_id(t["vendor_id"]), ok=ok, silent=silent or None, fails=fails,
+               paused=fails >= MAX_FAILS or None, ms=int((time.time() - t0) * 1000))
     if fails >= MAX_FAILS:
         body += "\nThis report has been paused after repeated failures. You can resume it once things are fixed."
     run("UPDATE inbox SET body=? WHERE id=? AND vendor_id=?", (body, inbox_id, t["vendor_id"]))

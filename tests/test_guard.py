@@ -20,7 +20,7 @@ def test_blocked_without_model_call():
         h = {"Authorization": "Bearer " + jwt.encode({"role": "viewer", "sub": "v1"}, "s", algorithm="HS256")}
         r = TestClient(app).post("/chat", json={"messages": u(t)}, headers=h)
         assert r.status_code == 200 and not f.calls, t
-        assert "😊" in r.json()["reply"]  # polite
+        assert "Okghumo" in r.json()["reply"] and "thank" in r.json()["reply"].lower(), t  # polite, on-brand
 
 
 def test_domain_questions_pass():
@@ -30,7 +30,9 @@ def test_domain_questions_pass():
 
 
 def test_greeting_and_thanks_canned():
-    assert guard.check(u("Hi!")) == guard.HELLO and guard.check(u("thanks")) == guard.WELCOME
+    from app import lang
+    assert guard.check(u("Hi!")) == lang.REPLIES["hello"]["en"]
+    assert guard.check(u("thanks")) == lang.REPLIES["thanks"]["en"]
 
 
 def test_trim_caps_history():

@@ -14,14 +14,13 @@ import json
 import logging
 import os
 import time
-from collections import defaultdict, deque
 from contextlib import closing
 
 import httpx
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from fastapi.responses import PlainTextResponse
 
-from app import assistant, guard, schedules
+from app import assistant, guard, lang, logs, ratelimit, sanitize, schedules
 from app.db import connect, run
 
 log = logging.getLogger("whatsapp")
@@ -77,18 +76,12 @@ def send(to: str, text: str) -> None:
 
 
 # ---- small in-memory state (see ponytail note) ----
-_hits: dict[str, deque] = defaultdict(deque)
+_hits = ratelimit._hits  # one shared sliding-window store (tests clear it)
 _hist: dict[str, tuple[float, list]] = {}  # phone -> (last activity, messages); keyed by phone = per vendor
 
 
 def allow(key: str, n: int, per: int) -> bool:
-    q, now = _hits[key], time.time()
-    while q and q[0] < now - per:
-        q.popleft()
-    if len(q) >= n:
-        return False
-    q.append(now)
-    return True
+    return ratelimit.hit(key, n, per) == 0
 
 
 def _messages(phone: str) -> list:
@@ -113,39 +106,52 @@ def _first_seen(wamid: str) -> bool:
 # ---- the conversation ----
 def _start_link(phone: str) -> None:
     if not allow(f"start:{phone}", 5, 3600):
+        logs.event(log, "rate_limited", logging.WARNING, scope="wa_link", phone=logs.mask_phone(phone))
         return send(phone, "Too many link requests. Please try again in an hour.")
+    logs.event(log, "link_started", phone=logs.mask_phone(phone))
     send(phone, "Hi! To use the Okghumo assistant, link your account first. Open this link (valid 10 minutes), "
                 "log in, then tap the button to come back here and press Send:\n" + start(phone))
 
 
 def _redeem(phone: str, code: str) -> None:
     if not allow(f"redeem:{phone}", 5, 3600):
+        logs.event(log, "rate_limited", logging.WARNING, scope="wa_redeem", phone=logs.mask_phone(phone))
         return send(phone, "Too many attempts. Please try again in an hour.")
     try:
         t = redeem(phone, code)
     except BadCode:
+        logs.event(log, "link_failed", logging.WARNING, reason="bad_code", phone=logs.mask_phone(phone))
         return send(phone, "That code is invalid or expired. Send *hi* to get a new link.")
     except LinkInvalid:
+        logs.event(log, "link_failed", logging.WARNING, reason="account_invalid", phone=logs.mask_phone(phone))
         return send(phone, "This account can't use the assistant.")
     if t.get("role") not in ROLES:
+        logs.event(log, "link_failed", logging.WARNING, reason="role_not_allowed", phone=logs.mask_phone(phone),
+                   role=t.get("role"))
         revoke(phone)
         return send(phone, "This account type can't use the WhatsApp assistant.")
+    logs.event(log, "link_redeemed", phone=logs.mask_phone(phone), role=t.get("role"))
     send(phone, "Connected ✅ Ask me about your sales, bookings and collections. Send *STOP* to unlink.")
 
 
 def _answer(phone: str, text: str, wamid: str) -> None:
-    if not allow(f"msg:{phone}", 20, 3600):
+    if not allow(f"burst:{phone}", int(os.environ.get("RATE_WA_PER_MIN", 6)), 60):  # fast spam: no token mint, no model
+        logs.event(log, "rate_limited", logging.WARNING, scope="wa_msg", window="min", phone=logs.mask_phone(phone))
+        return send(phone, lang.reply("rate_limited", text))
+    if not allow(f"msg:{phone}", int(os.environ.get("RATE_WA_PER_HOUR", 20)), 3600):
+        logs.event(log, "rate_limited", logging.WARNING, scope="wa_msg", window="hour", phone=logs.mask_phone(phone))
         return send(phone, "You're sending a lot of messages. Please try again in a little while.")
     try:
         t = token(phone)  # OkGhumo decides who this phone is; fresh short-lived token every question
     except NotLinked:
         return _start_link(phone)
     except LinkInvalid:
+        logs.event(log, "message_denied", logging.WARNING, reason="link_invalid", phone=logs.mask_phone(phone))
         return send(phone, "This account can no longer use the assistant. Please contact OkGhumo support.")
     if t.get("role") not in ROLES:
         return send(phone, "This account type can't use the WhatsApp assistant.")
     if not t.get("mcpAccessToken"):  # fail closed: no token, no model call
-        log.error("okghumo returned no mcp token")
+        logs.event(log, "message_denied", logging.ERROR, reason="no_mcp_token", phone=logs.mask_phone(phone))
         return send(phone, "The assistant isn't available right now. Please try again later.")
     try:
         _graph({"status": "read", "message_id": wamid, "typing_indicator": {"type": "text"}})
@@ -154,19 +160,24 @@ def _answer(phone: str, text: str, wamid: str) -> None:
     vendor, msgs = "wa:" + phone, _messages(phone) + [{"role": "user", "content": text}]  # own namespace per phone
     done = schedules.intercept(vendor, t["role"], msgs, where="here on WhatsApp")  # YES/NO to OUR prompt: code, no model
     if done is not None:
+        logs.event(log, "wa_reply", phone=logs.mask_phone(phone), source="confirmation", model_called=False)
         _remember(phone, msgs + [{"role": "assistant", "content": done}])
         return send(phone, done)
     if flush(phone) and len(text) <= 10:  # a ping that only opened the 24h window: reports are enough
         return
-    refusal = guard.check(msgs)  # off-topic / injection / oversized / greeting: canned polite reply, no model call
-    if refusal:
-        _remember(phone, msgs + [{"role": "assistant", "content": refusal}])
-        return send(phone, refusal)
+    blocked = guard.classify(msgs)  # off-topic / injection / oversized / greeting: canned polite reply, no model call
+    if blocked:
+        logs.event(log, "wa_reply", phone=logs.mask_phone(phone), source="guard", reason=blocked[0], model_called=False)
+        _remember(phone, msgs + [{"role": "assistant", "content": blocked[1]}])
+        return send(phone, blocked[1])
     sched = schedules.for_vendor(vendor, t["role"])
     out = assistant.ask(assistant.get_client(), t["role"], t["mcpAccessToken"], msgs,
                         SYSTEM + (schedules.SCHED_SYSTEM + schedules.WA_SCHED if sched else ""), extra=sched)
-    reply = sched.finish(out["reply"]) if sched else out["reply"]
+    clean = sanitize.clean_reply(out["reply"], msgs)  # presentation only: ids, dashes, emoji cap (digits untouched)
+    reply = sched.finish(clean) if sched else clean
     reply = reply or "Sorry, I couldn't find an answer to that."
+    logs.event(log, "wa_reply", phone=logs.mask_phone(phone), source="model", model_called=True, stop=out["stop_reason"],
+               tools=",".join(out["tools_used"]) or None, reply_chars=len(reply))
     _remember(phone, msgs + [{"role": "assistant", "content": reply}])
     send(phone, reply)
 
@@ -182,6 +193,7 @@ def deliver(inbox_id: int, vendor: str, title: str, body: str) -> None:
     try:
         send(phone, f"*{title}*\n{body}")
         run("UPDATE inbox SET sent=1 WHERE id=? AND vendor_id=?", (inbox_id, vendor))
+        logs.event(log, "delivered", phone=logs.mask_phone(phone), inbox=inbox_id, via="text")
     except httpx.HTTPStatusError:  # window closed (or Meta refused)
         tpl, pn = os.environ.get("WHATSAPP_REPORT_TEMPLATE"), os.environ.get("WHATSAPP_TEMPLATE_PARAM")  # pn: named variable
         if tpl:
@@ -190,10 +202,15 @@ def deliver(inbox_id: int, vendor: str, title: str, body: str) -> None:
                     "name": tpl, "language": {"code": os.environ.get("WHATSAPP_TEMPLATE_LANG", "en")},
                     "components": [{"type": "body", "parameters": [{"type": "text", "text": " ".join(title.split())[:60],
                                                                 **({"parameter_name": pn} if pn else {})}]}]}})
+                logs.event(log, "delivered", phone=logs.mask_phone(phone), inbox=inbox_id, via="template")
             except Exception as e:
-                log.error("template send failed: %s", type(e).__name__)
+                logs.event(log, "delivery_failed", logging.ERROR, phone=logs.mask_phone(phone), via="template",
+                           error=type(e).__name__)
+        else:
+            logs.event(log, "delivery_held", logging.WARNING, phone=logs.mask_phone(phone), inbox=inbox_id,
+                       reason="window_closed_no_template")
     except Exception as e:
-        log.error("scheduled delivery failed: %s", type(e).__name__)
+        logs.event(log, "delivery_failed", logging.ERROR, phone=logs.mask_phone(phone), via="text", error=type(e).__name__)
 
 
 def flush(phone: str) -> int:
@@ -228,6 +245,7 @@ def _logout(phone: str) -> None:
     except httpx.HTTPError:
         return send(phone, "I couldn't log you out just now. Please try again in a minute.")
     _hist.pop(phone, None)
+    logs.event(log, "logout", phone=logs.mask_phone(phone), already=already or None)
     for tbl in ("tasks", "proposals", "inbox"):  # logged out = no more messages to this number, no report text kept
         run(f"DELETE FROM {tbl} WHERE vendor_id=?", ("wa:" + phone,))
     send(phone, ("You're already logged out. " if already else "Logged out ✅ ") + "Send *hi* any time to connect again.")
@@ -245,7 +263,7 @@ def handle(phone: str, text: str | None, wamid: str) -> None:
         else:
             _answer(phone, t, wamid)
     except Exception as e:  # never leak details to the user; type only in the log
-        log.error("whatsapp handler failed: %s", type(e).__name__)
+        logs.event(log, "handler_failed", logging.ERROR, phone=logs.mask_phone(phone), error=type(e).__name__)
         try:
             send(phone, "Sorry, something went wrong. Please try again in a minute.")
         except Exception:
@@ -269,6 +287,7 @@ async def receive(request: Request, bg: BackgroundTasks):
     raw = await request.body()  # signature is over the RAW bytes
     want = "sha256=" + hmac.new(secret.encode(), raw, hashlib.sha256).hexdigest()
     if not hmac.compare_digest(request.headers.get("X-Hub-Signature-256", "").encode(), want.encode()):
+        logs.event(log, "webhook_rejected", logging.WARNING, reason="bad_signature")
         raise HTTPException(403)
     try:
         body = json.loads(raw)
@@ -279,7 +298,9 @@ async def receive(request: Request, bg: BackgroundTasks):
                     continue  # not our number
                 for m in v.get("messages", []):
                     if _first_seen(m["id"]):
+                        logs.event(log, "wa_message", phone=logs.mask_phone(m["from"]), type=m.get("type"))
                         bg.add_task(handle, m["from"], m["text"]["body"] if m.get("type") == "text" else None, m["id"])
     except (ValueError, KeyError, AttributeError, TypeError):
+        logs.event(log, "webhook_rejected", logging.WARNING, reason="bad_payload")
         raise HTTPException(400)
     return {"ok": True}  # always 200 fast so Meta doesn't retry

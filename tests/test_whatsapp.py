@@ -349,3 +349,10 @@ def test_web_vendor_rows_are_not_pushed_to_whatsapp(sch):
     _due_task("reminder", vendor="web-vendor")
     scheduler.tick()
     assert not sch.sent
+
+
+def test_burst_limit_per_minute_no_model_call(env, monkeypatch):
+    monkeypatch.setenv("RATE_WA_PER_MIN", "3")
+    env.tokens["919800000001"] = {"role": "vendor", "mcpAccessToken": "t"}
+    for _ in range(6): post("what are my sales")
+    assert len(env.model.calls) == 3
