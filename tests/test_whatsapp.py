@@ -127,7 +127,76 @@ def test_bad_code_message(env, monkeypatch):
 
 def test_stop_unlinks(env):
     post("STOP", phone="919800000003")
-    assert env.revoked == ["919800000003"] and "Unlinked" in said(env)[0]
+    assert env.revoked == ["919800000003"] and "Logged out" in said(env)[0]
+
+
+@pytest.mark.parametrize("cmd", ["/logout", "logout", "Log out", "  /LOGOUT  ", "/log   out", "unlink", "/stop"])
+def test_logout_commands_revoke_and_never_reach_model(env, cmd):
+    env.tokens["919800000001"] = {"role": "vendor", "mcpAccessToken": "t"}
+    post(cmd)
+    assert env.revoked == ["919800000001"] and "Logged out" in said(env)[0] and not env.model.calls
+
+
+@pytest.mark.parametrize("msg", ["how do I logout", "/logout please", "logout of what?", "stopping by tomorrow", "/logoutx"])
+def test_logout_only_matches_whole_message(env, msg):
+    env.tokens["919800000001"] = {"role": "vendor", "mcpAccessToken": "t"}
+    post(msg)
+    assert not env.revoked and len(env.model.calls) == 1
+
+
+def test_logout_then_next_message_needs_relinking(env, monkeypatch):
+    env.tokens["919800000001"] = {"role": "vendor", "mcpAccessToken": "t"}
+    monkeypatch.setattr(w, "revoke", lambda p: (env.revoked.append(p), env.tokens.pop(p)))
+    post("/logout")
+    post("sales?")
+    assert "https://okg.test/connect?state=abc" in said(env)[-1] and not env.model.calls
+
+
+def test_logout_clears_history_and_only_this_phones_state(env):
+    a, b = "919800000001", "919800000002"
+    env.tokens.update({a: {"role": "vendor", "mcpAccessToken": "t"}, b: {"role": "vendor", "mcpAccessToken": "t"}})
+    for p in ("tasks", "proposals", "inbox"):
+        dbrun(f"DELETE FROM {p}")
+    post("secret A", phone=a); post("B q", phone=b)
+    for v in ("wa:" + a, "wa:" + b):
+        dbrun("INSERT INTO tasks(vendor_id,name,message,cron,tz,next_run_at,created_at) VALUES(?,?,?,?,?,?,?)",
+              (v, "n", "m", "0 8 * * *", "Asia/Kolkata", "2099-01-01T00:00:00+00:00", "x"))
+        dbrun("INSERT INTO proposals(vendor_id,payload,created_at) VALUES(?,?,?)", (v, "{}", 0))
+        dbrun("INSERT INTO inbox(vendor_id,task_id,scheduled_for,title,body,created_at,sent) VALUES(?,?,?,?,?,?,0)",
+              (v, 1, v, "t", "report body", "x"))
+    post("/logout", phone=a)
+    assert a not in w._hist and b in w._hist
+    for tbl in ("tasks", "proposals", "inbox"):
+        assert [r["vendor_id"] for r in dbrun(f"SELECT vendor_id FROM {tbl}")] == ["wa:" + b]
+
+
+def test_logout_when_already_unlinked_still_cleans_up(env, monkeypatch):
+    def nl(phone): raise w.NotLinked
+    monkeypatch.setattr(w, "revoke", nl)
+    dbrun("DELETE FROM tasks")
+    dbrun("INSERT INTO tasks(vendor_id,name,message,cron,tz,next_run_at,created_at) VALUES(?,?,?,?,?,?,?)",
+          ("wa:919800000001", "n", "m", "0 8 * * *", "Asia/Kolkata", "2099-01-01T00:00:00+00:00", "x"))
+    post("/logout")
+    assert "already logged out" in said(env)[0] and not dbrun("SELECT * FROM tasks")
+
+
+def test_logout_invalid_account_counts_as_logged_out(env, monkeypatch):
+    def bad(phone): raise w.LinkInvalid
+    monkeypatch.setattr(w, "revoke", bad)
+    post("/logout")
+    assert "Logged out" in said(env)[0]
+
+
+def test_logout_okghumo_down_keeps_state_and_tells_vendor(env, monkeypatch):
+    def down(phone): raise httpx.ConnectError("down")
+    monkeypatch.setattr(w, "revoke", down)
+    dbrun("DELETE FROM tasks")
+    dbrun("INSERT INTO tasks(vendor_id,name,message,cron,tz,next_run_at,created_at) VALUES(?,?,?,?,?,?,?)",
+          ("wa:919800000001", "n", "m", "0 8 * * *", "Asia/Kolkata", "2099-01-01T00:00:00+00:00", "x"))
+    w._hist["919800000001"] = (9e12, [{"role": "user", "content": "x"}])
+    post("/logout")
+    assert "couldn't log you out" in said(env)[0] and "Logged out" not in said(env)[0]
+    assert dbrun("SELECT * FROM tasks") and "919800000001" in w._hist
 
 
 def test_duplicate_delivery_processed_once(env):

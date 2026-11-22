@@ -208,17 +208,34 @@ def flush(phone: str) -> int:
     return n
 
 
+LOGOUT = {"stop", "unlink", "logout", "log out"}  # whole message only, optional leading "/"
+
+
+def _logout(phone: str) -> None:
+    """Revoke the link at OkGhumo FIRST (if that fails nothing local changes and the vendor is told), then wipe
+    everything we hold for this number: schedules, pending proposals, undelivered inbox rows, chat history."""
+    already = False
+    try:
+        revoke(phone)
+    except NotLinked:
+        already = True  # nothing to revoke, still clean up below
+    except LinkInvalid:
+        pass  # account no longer valid at OkGhumo: the link is dead anyway
+    except httpx.HTTPError:
+        return send(phone, "I couldn't log you out just now. Please try again in a minute.")
+    _hist.pop(phone, None)
+    for tbl in ("tasks", "proposals", "inbox"):  # logged out = no more messages to this number, no report text kept
+        run(f"DELETE FROM {tbl} WHERE vendor_id=?", ("wa:" + phone,))
+    send(phone, ("You're already logged out. " if already else "Logged out ✅ ") + "Send *hi* any time to connect again.")
+
+
 def handle(phone: str, text: str | None, wamid: str) -> None:
     try:
         t = (text or "").strip()
         if text is None:
             send(phone, "I can only read text messages for now.")
-        elif t.lower() in ("stop", "unlink"):
-            revoke(phone)
-            _hist.pop(phone, None)
-            for tbl in ("tasks", "proposals"):  # unlinked = no more scheduled messages to this number
-                run(f"DELETE FROM {tbl} WHERE vendor_id=?", ("wa:" + phone,))
-            send(phone, "Unlinked. Send *hi* any time to connect again.")
+        elif " ".join(t.lower().lstrip("/").split()) in LOGOUT:
+            _logout(phone)
         elif t.upper().startswith("LINK-") and " " not in t:
             _redeem(phone, t)  # phone comes from the signed webhook, never from the text
         else:
