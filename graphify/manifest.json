@@ -4,6 +4,11 @@
     "ast_hash": "d41d8cd98f00b204e9800998ecf8427e",
     "semantic_hash": ""
   },
+  "app/assistant.py": {
+    "mtime": 1795259940.4,
+    "ast_hash": "99b6bd2e1bdeed18fc6f253d955cc66d",
+    "semantic_hash": ""
+  },
   "app/auth.py": {
     "mtime": 1794992585.72,
     "ast_hash": "e61709b1ee94e7ff7958349f2fad0ffb",
@@ -15,13 +20,13 @@
     "semantic_hash": ""
   },
   "app/db.py": {
-    "mtime": 1794992593.45,
-    "ast_hash": "fc1ff8bcb9f57f73fe07698f98c5f9d2",
+    "mtime": 1795322307.87,
+    "ast_hash": "481e77f7f437000692c9d536cff12b22",
     "semantic_hash": ""
   },
   "app/main.py": {
-    "mtime": 1794992593.57,
-    "ast_hash": "4a9eead24af11a6a393f54f8d2d01da6",
+    "mtime": 1795260025.81,
+    "ast_hash": "651bc5d3282766d7ec6116a113c90d49",
     "semantic_hash": ""
   },
   "app/mcp_auth.py": {
@@ -30,18 +35,33 @@
     "semantic_hash": ""
   },
   "app/rbac.py": {
-    "mtime": 1794370580.06,
-    "ast_hash": "a7ef967c9fbd9d27d94309f66ccba82e",
+    "mtime": 1795199457.4,
+    "ast_hash": "a9471d820149e100d57bd5f0687a13a4",
+    "semantic_hash": ""
+  },
+  "app/runner.py": {
+    "mtime": 1795322325.55,
+    "ast_hash": "104c1acdd84c0989a7288a624cb568a3",
     "semantic_hash": ""
   },
   "app/scheduler.py": {
-    "mtime": 1794992609.78,
-    "ast_hash": "897697b764b5806ad71d2a2a63fade0c",
+    "mtime": 1795322325.55,
+    "ast_hash": "c6ca253f77a6e9fb4c6e8d60f46388ba",
+    "semantic_hash": ""
+  },
+  "app/schedules.py": {
+    "mtime": 1795322307.87,
+    "ast_hash": "38396796b687826dc6a241e09c8e8d72",
     "semantic_hash": ""
   },
   "app/tasks.py": {
-    "mtime": 1794992609.74,
-    "ast_hash": "8ea7bce883793f17698fd9aca43c735e",
+    "mtime": 1795260025.73,
+    "ast_hash": "78df0b9288c0a1e9552468e06cfc4d9c",
+    "semantic_hash": ""
+  },
+  "app/whatsapp.py": {
+    "mtime": 1795325274.72,
+    "ast_hash": "aaa9b7e9e1f3830df48d84a866597999",
     "semantic_hash": ""
   },
   "deploy/deploy.sh": {
@@ -50,8 +70,8 @@
     "semantic_hash": ""
   },
   "frontend/main.js": {
-    "mtime": 1794730779.51,
-    "ast_hash": "43ebd3fee99350f8751418de555be5ec",
+    "mtime": 1795260095.52,
+    "ast_hash": "da275e32fe8657e516e5580a66e75be9",
     "semantic_hash": ""
   },
   "frontend/package.json": {
@@ -60,8 +80,8 @@
     "semantic_hash": ""
   },
   "frontend/vite.config.js": {
-    "mtime": 1794730779.49,
-    "ast_hash": "7bea9b6528bb846a66044b896f7dae0e",
+    "mtime": 1795093954.17,
+    "ast_hash": "923441e6f42c7ea5dee2c2cc74f07fa5",
     "semantic_hash": ""
   },
   "tests/conftest.py": {
@@ -74,9 +94,19 @@
     "ast_hash": "29e25646ad0f48b9a5ca87c762ec797b",
     "semantic_hash": ""
   },
+  "tests/test_schedules.py": {
+    "mtime": 1795260083.62,
+    "ast_hash": "cd80ceeccc1b4e7cd6a487b72ea57700",
+    "semantic_hash": ""
+  },
   "tests/test_tasks.py": {
-    "mtime": 1794992657.68,
-    "ast_hash": "add848ccfad70131ec9258aafc6d1f60",
+    "mtime": 1795259940.36,
+    "ast_hash": "d2df0f52e6f682fb89413dc55d579f40",
+    "semantic_hash": ""
+  },
+  "tests/test_whatsapp.py": {
+    "mtime": 1795325274.73,
+    "ast_hash": "621290938c4a48065e241e90dddc30cc",
     "semantic_hash": ""
   },
   ".github/workflows/ci.yml": {
@@ -85,8 +115,8 @@
     "semantic_hash": ""
   },
   "CLAUDE.md": {
-    "mtime": 1795057967.34,
-    "ast_hash": "231bc5338acbf2856a924cc2ba5798fb",
+    "mtime": 1795322373.26,
+    "ast_hash": "db72fb8392aceb19de678798e9792e60",
     "semantic_hash": ""
   },
   "DESIGN.md": {
@@ -95,8 +125,13 @@
     "semantic_hash": ""
   },
   "GRAPHIFY.md": {
-    "mtime": 1794982228.5,
-    "ast_hash": "4b686db0ebcfc2de5490d116aa642d67",
+    "mtime": 1795058043.48,
+    "ast_hash": "f374a4643c9b40047291236155887cbf",
+    "semantic_hash": ""
+  },
+  "INTEGRATION_PLAN.md": {
+    "mtime": 1795100715.67,
+    "ast_hash": "55231dcded366ec668d24030927651a3",
     "semantic_hash": ""
   },
   "README.md": {
@@ -110,18 +145,28 @@
     "semantic_hash": ""
   },
   "SCHEDULING_ROADMAP.md": {
-    "mtime": 1794992713.43,
-    "ast_hash": "162612d16c78d203fdc0b83c7ac787eb",
+    "mtime": 1795260095.5,
+    "ast_hash": "973790bf81318f7ff89e139f877aaf15",
+    "semantic_hash": ""
+  },
+  "TESTER_GUIDE.md": {
+    "mtime": 1795100334.81,
+    "ast_hash": "8819fcf73bca920de607551ca87a0c8d",
+    "semantic_hash": ""
+  },
+  "WHATSAPP_PLAN.md": {
+    "mtime": 1795199498.34,
+    "ast_hash": "90d22cfc849d30ded22932fc960dabc5",
     "semantic_hash": ""
   },
   "docker-compose.yml": {
-    "mtime": 1794992657.7,
-    "ast_hash": "f1d296d4d4115f9e98437f0488b0fdd8",
+    "mtime": 1795093510.68,
+    "ast_hash": "f79e69ca8cc5b6435818854bd21cbe39",
     "semantic_hash": ""
   },
   "frontend/index.html": {
-    "mtime": 1794730779.51,
-    "ast_hash": "0f303090c51047dfe865a6fef59b06f4",
+    "mtime": 1795093953.91,
+    "ast_hash": "6a0dce2027bf050d2e23e1f9e07255eb",
     "semantic_hash": ""
   },
   "requirements.txt": {
