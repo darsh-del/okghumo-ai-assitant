@@ -13,6 +13,7 @@ import hmac
 import json
 import logging
 import os
+import threading
 import time
 from contextlib import closing
 
@@ -229,7 +230,11 @@ def flush(phone: str) -> int:
     return n
 
 
-LOGOUT = {"stop", "unlink", "logout", "log out"}  # whole message only, optional leading "/"
+LOGOUT = {w for c in ("stop", "unlink", "logout", "log out") for w in (c, "/" + c)}  # the exact message, any case, nothing else
+
+
+def is_logout(t: str | None) -> bool:
+    return (t or "").strip().lower() in LOGOUT
 
 
 def _logout(phone: str) -> None:
@@ -251,12 +256,49 @@ def _logout(phone: str) -> None:
     send(phone, ("You're already logged out. " if already else "Logged out ✅ ") + "Send *hi* any time to connect again.")
 
 
+# ---- coalescing: a thought sent as several quick messages is ONE question ----
+_pending: dict[str, list[tuple[str | None, str]]] = {}  # phone -> [(text, wamid)] not yet answered
+_plock = threading.Lock()
+_locks: dict[str, threading.Lock] = {}  # one worker at a time per phone: replies and history stay in order
+
+
+def _is_command(t: str | None) -> bool:
+    t = (t or "").strip()
+    return is_logout(t) or (t.upper().startswith("LINK-") and " " not in t)
+
+
+def enqueue(phone: str, text: str | None, wamid: str) -> None:
+    with _plock:
+        _pending.setdefault(phone, []).append((text, wamid))
+
+
+def process(phone: str) -> None:
+    """Wait a moment for the vendor to finish typing, then answer everything they sent as one message.
+    ponytail: in-process wait (WA_DEBOUNCE_S, default 5s); a worker restart drops it like the rest of the queue."""
+    with _plock:
+        lock = _locks.setdefault(phone, threading.Lock())
+    with lock:  # a second task for the same phone waits here, then finds nothing left to do
+        time.sleep(float(os.environ.get("WA_DEBOUNCE_S", 5)))
+        with _plock:
+            batch = _pending.pop(phone, [])
+        if not batch:
+            return
+        if len(batch) > 1:
+            logs.event(log, "wa_coalesced", phone=logs.mask_phone(phone), count=len(batch))
+        if any(_is_command(t) for t, _ in batch):  # STOP / LINK-code must stay whole messages
+            for t, w in batch:
+                handle(phone, t, w)
+            return
+        texts = [t for t, _ in batch if t is not None]
+        handle(phone, "\n".join(texts) if texts else None, batch[-1][1])
+
+
 def handle(phone: str, text: str | None, wamid: str) -> None:
     try:
         t = (text or "").strip()
         if text is None:
             send(phone, "I can only read text messages for now.")
-        elif " ".join(t.lower().lstrip("/").split()) in LOGOUT:
+        elif is_logout(t):
             _logout(phone)
         elif t.upper().startswith("LINK-") and " " not in t:
             _redeem(phone, t)  # phone comes from the signed webhook, never from the text
@@ -299,7 +341,8 @@ async def receive(request: Request, bg: BackgroundTasks):
                 for m in v.get("messages", []):
                     if _first_seen(m["id"]):
                         logs.event(log, "wa_message", phone=logs.mask_phone(m["from"]), type=m.get("type"))
-                        bg.add_task(handle, m["from"], m["text"]["body"] if m.get("type") == "text" else None, m["id"])
+                        enqueue(m["from"], m["text"]["body"] if m.get("type") == "text" else None, m["id"])
+                        bg.add_task(process, m["from"])
     except (ValueError, KeyError, AttributeError, TypeError):
         logs.event(log, "webhook_rejected", logging.WARNING, reason="bad_payload")
         raise HTTPException(400)

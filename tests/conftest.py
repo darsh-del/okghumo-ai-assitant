@@ -9,7 +9,7 @@ os.environ.update(
     CREDENTIAL_KEY=Fernet.generate_key().decode(),
     DB_PATH=os.path.join(tempfile.mkdtemp(), "t.db"),
     RATE_CHAT_PER_MIN="1000", RATE_CHAT_PER_HOUR="10000", RATE_CHAT_GLOBAL_PER_MIN="100000",  # tests hammer one vendor
-    RATE_WA_PER_MIN="1000",
+    RATE_WA_PER_MIN="1000", WA_DEBOUNCE_S="0",
 )
 
 import pytest  # noqa: E402

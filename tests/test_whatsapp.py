@@ -130,14 +130,14 @@ def test_stop_unlinks(env):
     assert env.revoked == ["919800000003"] and "Logged out" in said(env)[0]
 
 
-@pytest.mark.parametrize("cmd", ["/logout", "logout", "Log out", "  /LOGOUT  ", "/log   out", "unlink", "/stop"])
+@pytest.mark.parametrize("cmd", ["/logout", "logout", "Log out", "  /LOGOUT  ", "unlink", "/stop"])
 def test_logout_commands_revoke_and_never_reach_model(env, cmd):
     env.tokens["919800000001"] = {"role": "vendor", "mcpAccessToken": "t"}
     post(cmd)
     assert env.revoked == ["919800000001"] and "Logged out" in said(env)[0] and not env.model.calls
 
 
-@pytest.mark.parametrize("msg", ["how do I logout", "/logout please", "logout of what?", "stopping by tomorrow", "/logoutx"])
+@pytest.mark.parametrize("msg", ["how do I logout", "/logout please", "logout of what?", "stopping by tomorrow", "/logoutx", "//stop", "/log   out", "stop."])
 def test_logout_only_matches_whole_message(env, msg):
     env.tokens["919800000001"] = {"role": "vendor", "mcpAccessToken": "t"}
     post(msg)
@@ -356,3 +356,16 @@ def test_burst_limit_per_minute_no_model_call(env, monkeypatch):
     env.tokens["919800000001"] = {"role": "vendor", "mcpAccessToken": "t"}
     for _ in range(6): post("what are my sales")
     assert len(env.model.calls) == 3
+
+
+def test_quick_messages_are_answered_as_one_question(env):
+    from app import whatsapp as w
+    w.enqueue("919800000001", "kya hal chal kesa chal raha he dhandha", "w1")
+    w.enqueue("919800000001", "?", "w2")
+    seen = []
+    orig, w.handle = w.handle, lambda p, t, i: seen.append((t, i))
+    try:
+        w.process("919800000001"); w.process("919800000001")  # second task finds nothing left
+    finally:
+        w.handle = orig
+    assert seen == [("kya hal chal kesa chal raha he dhandha\n?", "w2")]
