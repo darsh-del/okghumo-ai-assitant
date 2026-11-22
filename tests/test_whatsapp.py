@@ -259,6 +259,7 @@ def test_wa_unlinked_number_pauses_silently(sch):
 
 def test_wa_window_closed_sends_template_then_flushes_on_next_message(sch, monkeypatch):
     monkeypatch.setenv("WHATSAPP_REPORT_TEMPLATE", "report_ready")
+    monkeypatch.setenv("WHATSAPP_TEMPLATE_PARAM", "report_type")
     sent = []
 
     def graph(p):
@@ -268,7 +269,7 @@ def test_wa_window_closed_sends_template_then_flushes_on_next_message(sch, monke
     monkeypatch.setattr(w, "_graph", graph)
     _due_task()
     scheduler.tick()
-    assert [p.get("type") for p in sent] == ["template"] and dbrun("SELECT sent FROM inbox")[0]["sent"] == 0
+    assert [p.get("type") for p in sent] == ["template"] and sent[0]["template"]["components"][0]["parameters"][0]["parameter_name"] == "report_type" and dbrun("SELECT sent FROM inbox")[0]["sent"] == 0
     sch.tokens["open"] = True  # vendor replied: window open
     post("report")
     assert any(p.get("type") == "text" and "Daily sales" in p["text"]["body"] for p in sent)

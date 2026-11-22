@@ -179,12 +179,13 @@ def deliver(inbox_id: int, vendor: str, title: str, body: str) -> None:
         send(phone, f"*{title}*\n{body}")
         run("UPDATE inbox SET sent=1 WHERE id=? AND vendor_id=?", (inbox_id, vendor))
     except httpx.HTTPStatusError:  # window closed (or Meta refused)
-        tpl = os.environ.get("WHATSAPP_REPORT_TEMPLATE")
+        tpl, pn = os.environ.get("WHATSAPP_REPORT_TEMPLATE"), os.environ.get("WHATSAPP_TEMPLATE_PARAM")  # pn: named variable
         if tpl:
             try:
                 _graph({"to": phone, "type": "template", "template": {
                     "name": tpl, "language": {"code": os.environ.get("WHATSAPP_TEMPLATE_LANG", "en")},
-                    "components": [{"type": "body", "parameters": [{"type": "text", "text": " ".join(title.split())[:60]}]}]}})
+                    "components": [{"type": "body", "parameters": [{"type": "text", "text": " ".join(title.split())[:60],
+                                                                **({"parameter_name": pn} if pn else {})}]}]}})
             except Exception as e:
                 log.error("template send failed: %s", type(e).__name__)
     except Exception as e:
