@@ -480,3 +480,10 @@ def test_on_demand_whatsapp_vendor_gets_file_object_but_nothing_stored(monkeypat
     assert run("SELECT 1 FROM inbox WHERE vendor_id='wa:99'") == []
     assert h.call("create_pdf_report", {"question": "q"}).startswith("error")  # one per message
     assert reports.OnDemand(None, "v", "hacker", "t").call("create_pdf_report", {"question": "q"}).startswith("error")
+
+
+def test_pdf_long_labels_kept_and_long_kpis_render():
+    s = pdfreport.parse('{"summary":"x","kpis":[{"label":"Booking value","value":"Rs. 33,48,608.2 vs Rs. 41,27,574"}],'
+                        '"charts":[{"type":"bar","title":"t","labels":["Walk-in discounted Oct","Walk-in discounted Nov"],"values":[1,2]}]}')
+    assert s["charts"][0]["labels"][0] == "Walk-in discounted Oct"  # not cut to a few characters
+    assert pdfreport.render(s).startswith(b"%PDF")

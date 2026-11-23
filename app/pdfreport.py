@@ -12,7 +12,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 from xml.sax.saxutils import escape
 
-from reportlab.graphics.charts.barcharts import VerticalBarChart
+from reportlab.graphics.charts.barcharts import HorizontalBarChart, VerticalBarChart
 from reportlab.graphics.charts.linecharts import HorizontalLineChart
 from reportlab.graphics.charts.piecharts import Pie
 from reportlab.graphics.shapes import Drawing
@@ -86,7 +86,7 @@ def parse(raw: str) -> dict:
     for c in lst("charts", 3):
         if not isinstance(c, dict) or c.get("type") not in ("bar", "line", "pie"):
             continue
-        labels = [_s(x, 24) for x in (c.get("labels") if isinstance(c.get("labels"), list) else [])[:12]]
+        labels = [_s(x, 40) for x in (c.get("labels") if isinstance(c.get("labels"), list) else [])[:12]]
         vals = [_num(x) for x in (c.get("values") if isinstance(c.get("values"), list) else [])[:12]]
         if not labels or len(labels) != len(vals) or None in vals:
             continue
@@ -118,27 +118,45 @@ def text_of(spec: dict) -> str:
 
 
 def _chart(c: dict, w: float) -> Drawing:
-    d = Drawing(w, 190)
-    labels = [x[:14] for x in c["labels"]]
+    labels, n = c["labels"], len(c["labels"])
     if c["type"] == "pie":
+        d = Drawing(w, 190)
         p = Pie()
-        p.x, p.y, p.width, p.height = 20, 20, 150, 150
-        p.data, p.labels = c["values"], [f"{l}" for l in labels]
+        p.x, p.y, p.width, p.height = (w - 150) / 2, 20, 150, 150  # centred: side labels have room both ways
+        p.data, p.labels = c["values"], [x[:26] for x in labels]
         p.sideLabels, p.slices.strokeColor = 1, colors.white
         p.slices.fontSize = 7
-        for i in range(len(c["values"])):
+        for i in range(n):
             p.slices[i].fillColor = PALETTE[i % len(PALETTE)]
         d.add(p)
         return d
+    grid = colors.HexColor("#e5e7eb")
+    if c["type"] == "bar" and (n > 6 or max(map(len, labels)) > 12):
+        # horizontal bars: the full name is written to the left of its bar, so long names are never cut off
+        left = min(190, 12 + 3.9 * max(map(len, labels)))
+        d = Drawing(w, 40 + 20 * n)
+        ch = HorizontalBarChart()
+        ch.x, ch.y, ch.width, ch.height = left, 25, w - left - 35, 20 * n
+        ch.data = [c["values"]]
+        ch.categoryAxis.categoryNames = labels
+        ch.categoryAxis.reverseDirection = 1  # first item on top
+        ch.categoryAxis.labels.fontSize = ch.valueAxis.labels.fontSize = 7
+        ch.categoryAxis.labels.boxAnchor, ch.categoryAxis.labels.dx = "e", -4
+        ch.valueAxis.valueMin = min(0, min(c["values"]))
+        ch.valueAxis.gridStrokeColor, ch.valueAxis.visibleGrid = grid, 1
+        ch.bars[0].fillColor, ch.bars[0].strokeColor, ch.barWidth = ACCENT, colors.white, 12
+        d.add(ch)
+        return d
+    d = Drawing(w, 190)
     ch = VerticalBarChart() if c["type"] == "bar" else HorizontalLineChart()
     ch.x, ch.y, ch.width, ch.height = 45, 40, w - 70, 125
     ch.data = [c["values"]]
-    ch.categoryAxis.categoryNames = labels
+    ch.categoryAxis.categoryNames = [x[:22] for x in labels]
     ch.categoryAxis.labels.fontSize = ch.valueAxis.labels.fontSize = 7
-    if len(labels) > 6:
+    if n > 6:
         ch.categoryAxis.labels.angle, ch.categoryAxis.labels.dy, ch.categoryAxis.labels.boxAnchor = 30, -6, "ne"
     ch.valueAxis.valueMin = min(0, min(c["values"]))
-    ch.valueAxis.gridStrokeColor, ch.valueAxis.visibleGrid = colors.HexColor("#e5e7eb"), 1
+    ch.valueAxis.gridStrokeColor, ch.valueAxis.visibleGrid = grid, 1
     if c["type"] == "bar":
         ch.bars[0].fillColor, ch.bars[0].strokeColor, ch.barWidth = ACCENT, colors.white, 8
     else:
@@ -171,10 +189,14 @@ def render(spec: dict, generated: str | None = None) -> bytes:
         story += [P(spec["summary"])]
     if spec["kpis"]:
         k = spec["kpis"]
-        rows = [[Paragraph(f'<font size="8" color="#6b7280">{escape(x["label"])}</font><br/><font size="15"><b>'
-                           f'{escape(x["value"])}</b></font>', body) for x in k[i:i + 3]] for i in range(0, len(k), 3)]
-        rows = [r + [""] * (3 - len(r)) for r in rows]
-        t = Table(rows, colWidths=[width / 3] * 3)
+        cols = 2 if max(len(x["value"]) for x in k) > 16 else 3  # long comparison values get wider boxes
+
+        def size(v: str) -> int:  # long values get smaller text so they fit instead of wrapping
+            return 15 if len(v) <= 14 else 12 if len(v) <= 22 else 10
+        rows = [[Paragraph(f'<font size="8" color="#6b7280">{escape(x["label"])}</font><br/><font size="{size(x["value"])}"><b>'
+                           f'{escape(x["value"])}</b></font>', body) for x in k[i:i + cols]] for i in range(0, len(k), cols)]
+        rows = [r + [""] * (cols - len(r)) for r in rows]
+        t = Table(rows, colWidths=[width / cols] * cols)
         t.setStyle(TableStyle([("BOX", (0, 0), (-1, -1), .5, colors.HexColor("#e5e7eb")),
                                ("INNERGRID", (0, 0), (-1, -1), .5, colors.HexColor("#e5e7eb")),
                                ("BACKGROUND", (0, 0), (-1, -1), TINT),
