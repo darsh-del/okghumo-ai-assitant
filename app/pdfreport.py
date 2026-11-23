@@ -25,9 +25,11 @@ from reportlab.platypus import KeepTogether, Paragraph, SimpleDocTemplate, Space
 from app import assistant
 
 MAX_PDF_BYTES = 2_000_000
-INK, MUTED, ACCENT = colors.HexColor("#1f2937"), colors.HexColor("#6b7280"), colors.HexColor("#0f766e")
-PALETTE = [colors.HexColor(h) for h in ("#0f766e", "#2563eb", "#d97706", "#7c3aed", "#dc2626", "#0891b2",
-                                         "#65a30d", "#db2777", "#4b5563", "#ca8a04", "#0d9488", "#9333ea")]
+BRAND = "#EB493A"  # the PDF theme: this orange-red on white. Change here only.
+INK, MUTED, ACCENT = colors.HexColor("#1f2937"), colors.HexColor("#6b7280"), colors.HexColor(BRAND)
+TINT = colors.HexColor("#FDECEA")  # light wash of the brand colour (table headers)
+PALETTE = [colors.HexColor(h) for h in (BRAND, "#F28B7F", "#B8281B", "#F6B3AB", "#7A1F16", "#FBD5D0",
+                                         "#4b5563", "#9ca3af", "#d1d5db", "#6b7280", "#374151", "#e5e7eb")]  # brand shades, then greys
 
 SPEC_PROMPT = (
     " OUTPUT FORMAT: reply with ONE JSON object and nothing else (no markdown fences, no commentary). Build it ONLY from "
@@ -149,7 +151,7 @@ def _footer(canvas, doc):
     canvas.saveState()
     canvas.setFont("Helvetica", 7.5)
     canvas.setFillColor(MUTED)
-    canvas.drawString(2 * cm, 1.1 * cm, "Okghumo Assistant")
+    canvas.drawString(2 * cm, 1.1 * cm, "AI Assistant")
     canvas.drawRightString(A4[0] - 2 * cm, 1.1 * cm, f"Page {doc.page}")
     canvas.restoreState()
 
@@ -175,7 +177,7 @@ def render(spec: dict, generated: str | None = None) -> bytes:
         t = Table(rows, colWidths=[width / 3] * 3)
         t.setStyle(TableStyle([("BOX", (0, 0), (-1, -1), .5, colors.HexColor("#e5e7eb")),
                                ("INNERGRID", (0, 0), (-1, -1), .5, colors.HexColor("#e5e7eb")),
-                               ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#f9fafb")),
+                               ("BACKGROUND", (0, 0), (-1, -1), TINT),
                                ("TOPPADDING", (0, 0), (-1, -1), 8), ("BOTTOMPADDING", (0, 0), (-1, -1), 8)]))
         story += [Spacer(1, 10), t]
     for c in spec["charts"]:
@@ -183,7 +185,7 @@ def render(spec: dict, generated: str | None = None) -> bytes:
     for tb in spec["tables"]:
         data = [[P(x, cell) for x in tb["columns"]]] + [[P(x, cell) for x in r] for r in tb["rows"]]
         t = Table(data, colWidths=[width / len(tb["columns"])] * len(tb["columns"]), repeatRows=1)
-        t.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#ccfbf1")),
+        t.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, 0), TINT),
                                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f9fafb")]),
                                ("LINEBELOW", (0, 0), (-1, -1), .25, colors.HexColor("#e5e7eb")),
                                ("VALIGN", (0, 0), (-1, -1), "TOP")]))
@@ -192,7 +194,7 @@ def render(spec: dict, generated: str | None = None) -> bytes:
         story += [P("Key insights", h2)] + [P("- " + x) for x in spec["insights"]]
     buf = io.BytesIO()
     SimpleDocTemplate(buf, pagesize=A4, leftMargin=2 * cm, rightMargin=2 * cm, topMargin=2 * cm, bottomMargin=1.8 * cm,
-                      title=spec["title"], author="Okghumo Assistant").build(story, onFirstPage=_footer, onLaterPages=_footer)
+                      title=spec["title"], author="AI Assistant").build(story, onFirstPage=_footer, onLaterPages=_footer)
     pdf = buf.getvalue()
     if len(pdf) > MAX_PDF_BYTES:
         raise BadSpec("too big")
