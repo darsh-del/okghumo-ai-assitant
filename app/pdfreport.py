@@ -16,18 +16,19 @@ from reportlab.graphics.charts.barcharts import HorizontalBarChart, VerticalBarC
 from reportlab.graphics.charts.linecharts import HorizontalLineChart
 from reportlab.graphics.charts.piecharts import Pie
 from reportlab.graphics.shapes import Drawing
+from reportlab.graphics.widgets.markers import makeMarker
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import cm
-from reportlab.platypus import KeepTogether, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+from reportlab.platypus import HRFlowable, KeepTogether, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 from app import assistant
 
 MAX_PDF_BYTES = 2_000_000
 BRAND = "#EB493A"  # the PDF theme: this orange-red on white. Change here only.
 INK, MUTED, ACCENT = colors.HexColor("#1f2937"), colors.HexColor("#6b7280"), colors.HexColor(BRAND)
-TINT = colors.HexColor("#FDECEA")  # light wash of the brand colour (table headers)
+RULE, ZEBRA = colors.HexColor("#e5e7eb"), colors.HexColor("#fafafa")  # hairlines and the faintest row shading
 PALETTE = [colors.HexColor(h) for h in (BRAND, "#F28B7F", "#B8281B", "#F6B3AB", "#7A1F16", "#FBD5D0",
                                          "#4b5563", "#9ca3af", "#d1d5db", "#6b7280", "#374151", "#e5e7eb")]  # brand shades, then greys
 
@@ -117,106 +118,153 @@ def text_of(spec: dict) -> str:
     return "\n".join(lines) or spec["title"]
 
 
+def _inr(v) -> str:
+    """12345678 -> 1,23,45,678 (Indian grouping, as the vendors' own figures are written); small/decimal numbers as-is."""
+    if abs(v) < 1000 or v != int(v):
+        return f"{v:,.2f}".rstrip("0").rstrip(".") if abs(v) >= 1000 else f"{v:g}"
+    sign, d = ("-" if v < 0 else ""), str(abs(int(v)))
+    head, tail = d[:-3], d[-3:]
+    parts = []
+    while len(head) > 2:
+        parts.insert(0, head[-2:])
+        head = head[:-2]
+    return sign + ",".join(([head] if head else []) + parts + [tail])
+
+
+def _soften(ch, value_axis_line: bool = False) -> None:
+    """Quiet axes: grey lines, muted small labels, light gridlines, thousands grouping on the value axis."""
+    for ax in (ch.categoryAxis, ch.valueAxis):
+        ax.strokeColor, ax.labels.fillColor, ax.labels.fontSize = colors.HexColor("#d1d5db"), MUTED, 7
+    ch.valueAxis.visibleAxis = int(value_axis_line)
+    ch.valueAxis.visibleTicks = 0
+    ch.valueAxis.gridStrokeColor, ch.valueAxis.visibleGrid, ch.valueAxis.gridStrokeWidth = RULE, 1, .5
+    ch.valueAxis.labelTextFormat = _inr
+    ch.valueAxis.valueMin = min(0, min(ch.data[0]))
+
+
 def _chart(c: dict, w: float) -> Drawing:
-    labels, n = c["labels"], len(c["labels"])
+    labels, n, vals = c["labels"], len(c["labels"]), c["values"]
     if c["type"] == "pie":
         d = Drawing(w, 190)
         p = Pie()
         p.x, p.y, p.width, p.height = (w - 150) / 2, 20, 150, 150  # centred: side labels have room both ways
-        p.data, p.labels = c["values"], [x[:26] for x in labels]
-        p.sideLabels, p.slices.strokeColor = 1, colors.white
-        p.slices.fontSize = 7
+        tot = sum(vals)
+        p.data, p.labels = vals, [f"{x[:24]} ({v / tot * 100:.0f}%)" for x, v in zip(labels, vals)]  # share computed from the data
+        p.sideLabels, p.slices.strokeColor, p.slices.strokeWidth = 1, colors.white, 1.5
+        p.slices.fontSize, p.slices.labelRadius = 7, 1.1
+        p.slices.fontColor = INK
+        p.sideLabelsOffset = .06
         for i in range(n):
             p.slices[i].fillColor = PALETTE[i % len(PALETTE)]
         d.add(p)
         return d
-    grid = colors.HexColor("#e5e7eb")
     if c["type"] == "bar" and (n > 6 or max(map(len, labels)) > 12):
         # horizontal bars: the full name is written to the left of its bar, so long names are never cut off
         left = min(190, 12 + 3.9 * max(map(len, labels)))
         d = Drawing(w, 40 + 20 * n)
         ch = HorizontalBarChart()
-        ch.x, ch.y, ch.width, ch.height = left, 25, w - left - 35, 20 * n
-        ch.data = [c["values"]]
+        ch.x, ch.y, ch.width, ch.height = left, 25, w - left - 75, 20 * n
+        ch.data = [vals]
         ch.categoryAxis.categoryNames = labels
         ch.categoryAxis.reverseDirection = 1  # first item on top
-        ch.categoryAxis.labels.fontSize = ch.valueAxis.labels.fontSize = 7
         ch.categoryAxis.labels.boxAnchor, ch.categoryAxis.labels.dx = "e", -4
-        ch.valueAxis.valueMin = min(0, min(c["values"]))
-        ch.valueAxis.gridStrokeColor, ch.valueAxis.visibleGrid = grid, 1
-        ch.bars[0].fillColor, ch.bars[0].strokeColor, ch.barWidth = ACCENT, colors.white, 12
+        _soften(ch)
+        ch.bars[0].fillColor, ch.bars[0].strokeColor, ch.barWidth = ACCENT, None, 11
+        ch.barLabelFormat, ch.barLabels.fontSize, ch.barLabels.fillColor = _inr, 7, INK
+        ch.barLabels.boxAnchor, ch.barLabels.dx = "w", 4
         d.add(ch)
         return d
     d = Drawing(w, 190)
     ch = VerticalBarChart() if c["type"] == "bar" else HorizontalLineChart()
-    ch.x, ch.y, ch.width, ch.height = 45, 40, w - 70, 125
-    ch.data = [c["values"]]
+    ch.x, ch.y, ch.width, ch.height = 50, 40, w - 80, 125
+    ch.data = [vals]
     ch.categoryAxis.categoryNames = [x[:22] for x in labels]
-    ch.categoryAxis.labels.fontSize = ch.valueAxis.labels.fontSize = 7
     if n > 6:
         ch.categoryAxis.labels.angle, ch.categoryAxis.labels.dy, ch.categoryAxis.labels.boxAnchor = 30, -6, "ne"
-    ch.valueAxis.valueMin = min(0, min(c["values"]))
-    ch.valueAxis.gridStrokeColor, ch.valueAxis.visibleGrid = grid, 1
+    _soften(ch)
     if c["type"] == "bar":
-        ch.bars[0].fillColor, ch.bars[0].strokeColor, ch.barWidth = ACCENT, colors.white, 8
+        ch.bars[0].fillColor, ch.bars[0].strokeColor, ch.barWidth = ACCENT, None, 9
+        ch.barLabelFormat, ch.barLabels.fontSize, ch.barLabels.fillColor = _inr, 7, INK
+        ch.barLabels.nudge = 7  # the value sits just above its bar
     else:
-        ch.lines[0].strokeColor, ch.lines[0].strokeWidth = ACCENT, 2
+        ln = ch.lines[0]
+        ln.strokeColor, ln.strokeWidth = ACCENT, 1.8
+        ln.symbol = makeMarker("Circle")
+        ln.symbol.fillColor, ln.symbol.strokeColor, ln.symbol.size = ACCENT, colors.white, 5
     d.add(ch)
     return d
 
 
-def _footer(canvas, doc):
+def _page(canvas, doc):
+    """Every page: a hairline + footer at the bottom (nothing at the top)."""
     canvas.saveState()
+    canvas.setStrokeColor(RULE)
+    canvas.setLineWidth(.5)
+    canvas.line(2 * cm, 1.55 * cm, A4[0] - 2 * cm, 1.55 * cm)
     canvas.setFont("Helvetica", 7.5)
     canvas.setFillColor(MUTED)
-    canvas.drawString(2 * cm, 1.1 * cm, "AI Assistant")
-    canvas.drawRightString(A4[0] - 2 * cm, 1.1 * cm, f"Page {doc.page}")
+    canvas.drawString(2 * cm, 1.05 * cm, "AI Assistant")
+    canvas.drawRightString(A4[0] - 2 * cm, 1.05 * cm, f"Page {doc.page}")
     canvas.restoreState()
+
+
+_NUMERIC = re.compile(r"^-?(rs\.?\s*)?[\d,]+(\.\d+)?\s*%?$", re.I)
 
 
 def render(spec: dict, generated: str | None = None) -> bytes:
     ss = getSampleStyleSheet()
-    h1 = ParagraphStyle("h1", parent=ss["Title"], textColor=INK, fontSize=20, alignment=0, spaceAfter=2)
-    sub = ParagraphStyle("sub", parent=ss["Normal"], textColor=MUTED, fontSize=9)
-    h2 = ParagraphStyle("h2", parent=ss["Heading2"], textColor=ACCENT, fontSize=12, spaceBefore=12, spaceAfter=4)
-    body = ParagraphStyle("b", parent=ss["Normal"], textColor=INK, fontSize=10, leading=14)
-    cell = ParagraphStyle("c", parent=body, fontSize=8.5, leading=10)
-    P = lambda t, s=body: Paragraph(escape(t), s)  # noqa: E731  (model text is never markup)
-    width = A4[0] - 4 * cm
+    h1 = ParagraphStyle("h1", parent=ss["Title"], textColor=INK, fontSize=21, leading=25, alignment=0, spaceAfter=3)
+    sub = ParagraphStyle("sub", parent=ss["Normal"], textColor=MUTED, fontSize=9, spaceAfter=8)
+    h2 = ParagraphStyle("h2", parent=ss["Heading2"], textColor=INK, fontSize=12, spaceBefore=16, spaceAfter=3)
+    body = ParagraphStyle("b", parent=ss["Normal"], textColor=INK, fontSize=10, leading=15)
+    cell = ParagraphStyle("c", parent=body, fontSize=8.5, leading=11)
+    cell_r = ParagraphStyle("cr", parent=cell, alignment=2)
+    head = ParagraphStyle("th", parent=cell, fontName="Helvetica-Bold", textColor=INK)
+    head_r = ParagraphStyle("thr", parent=head, alignment=2)
+    ins = ParagraphStyle("ins", parent=body, leftIndent=12, bulletIndent=0, bulletColor=ACCENT, spaceAfter=3)
+    P = lambda t, s=body, **kw: Paragraph(escape(t), s, **kw)  # noqa: E731  (model text is never markup)
+    H2 = lambda t: [P(t, h2), HRFlowable(width=26, thickness=2, color=ACCENT, hAlign="LEFT", spaceBefore=1, spaceAfter=6)]  # noqa: E731
+    width = A4[0] - 4 * cm - 12  # minus the frame's 6pt padding each side, so tables line up with the title
     gen = generated or datetime.now().strftime("%d %b %Y, %H:%M")
-    story = [P(spec["title"], h1), P(" | ".join(x for x in (spec["period"], "Generated " + gen) if x), sub), Spacer(1, 8)]
-    if spec["summary"]:
-        story += [P(spec["summary"])]
+    story = [P(spec["title"], h1), P(" | ".join(x for x in (spec["period"], "Generated " + gen) if x), sub),
+             HRFlowable(width="100%", thickness=.5, color=RULE, spaceAfter=10)]
+    if spec["summary"]:  # a quiet callout: brand-coloured left edge, no fill
+        t = Table([[P(spec["summary"])]], colWidths=[width])
+        t.setStyle(TableStyle([("LINEBEFORE", (0, 0), (0, -1), 2.5, ACCENT), ("LEFTPADDING", (0, 0), (-1, -1), 12),
+                               ("TOPPADDING", (0, 0), (-1, -1), 2), ("BOTTOMPADDING", (0, 0), (-1, -1), 2)]))
+        story += [t]
     if spec["kpis"]:
         k = spec["kpis"]
         cols = 2 if max(len(x["value"]) for x in k) > 16 else 3  # long comparison values get wider boxes
 
         def size(v: str) -> int:  # long values get smaller text so they fit instead of wrapping
             return 15 if len(v) <= 14 else 12 if len(v) <= 22 else 10
-        rows = [[Paragraph(f'<font size="8" color="#6b7280">{escape(x["label"])}</font><br/><font size="{size(x["value"])}"><b>'
+        rows = [[Paragraph(f'<font size="6.5" color="#6b7280">{escape(x["label"].upper())}</font><br/><font size="{size(x["value"])}"><b>'
                            f'{escape(x["value"])}</b></font>', body) for x in k[i:i + cols]] for i in range(0, len(k), cols)]
         rows = [r + [""] * (cols - len(r)) for r in rows]
         t = Table(rows, colWidths=[width / cols] * cols)
-        t.setStyle(TableStyle([("BOX", (0, 0), (-1, -1), .5, colors.HexColor("#e5e7eb")),
-                               ("INNERGRID", (0, 0), (-1, -1), .5, colors.HexColor("#e5e7eb")),
-                               ("BACKGROUND", (0, 0), (-1, -1), TINT),
-                               ("TOPPADDING", (0, 0), (-1, -1), 8), ("BOTTOMPADDING", (0, 0), (-1, -1), 8)]))
-        story += [Spacer(1, 10), t]
+        t.setStyle(TableStyle([("GRID", (0, 0), (-1, -1), .5, RULE), ("LINEABOVE", (0, 0), (-1, 0), 1.5, ACCENT),
+                               ("LEFTPADDING", (0, 0), (-1, -1), 10), ("TOPPADDING", (0, 0), (-1, -1), 9),
+                               ("BOTTOMPADDING", (0, 0), (-1, -1), 9)]))
+        story += [Spacer(1, 14), t]
     for c in spec["charts"]:
-        story.append(KeepTogether([P(c["title"] or "Chart", h2), _chart(c, width)]))
+        story.append(KeepTogether(H2(c["title"] or "Chart") + [_chart(c, width)]))
     for tb in spec["tables"]:
-        data = [[P(x, cell) for x in tb["columns"]]] + [[P(x, cell) for x in r] for r in tb["rows"]]
-        t = Table(data, colWidths=[width / len(tb["columns"])] * len(tb["columns"]), repeatRows=1)
-        t.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, 0), TINT),
-                               ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f9fafb")]),
-                               ("LINEBELOW", (0, 0), (-1, -1), .25, colors.HexColor("#e5e7eb")),
-                               ("VALIGN", (0, 0), (-1, -1), "TOP")]))
-        story += [P(tb["title"] or "Details", h2), t]
+        nc = len(tb["columns"])
+        num = [all(not r[i] or _NUMERIC.match(r[i]) for r in tb["rows"]) for i in range(nc)]  # numbers line up on the right
+        data = [[P(x, head_r if num[i] else head) for i, x in enumerate(tb["columns"])]] + \
+               [[P(x, cell_r if num[i] else cell) for i, x in enumerate(r)] for r in tb["rows"]]
+        t = Table(data, colWidths=[width / nc] * nc, repeatRows=1)
+        t.setStyle(TableStyle([("LINEBELOW", (0, 0), (-1, 0), 1, ACCENT),
+                               ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, ZEBRA]),
+                               ("LINEBELOW", (0, 1), (-1, -1), .25, RULE), ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                               ("TOPPADDING", (0, 0), (-1, -1), 5), ("BOTTOMPADDING", (0, 0), (-1, -1), 5)]))
+        story += H2(tb["title"] or "Details") + [t]
     if spec["insights"]:
-        story += [P("Key insights", h2)] + [P("- " + x) for x in spec["insights"]]
+        story += H2("Key insights") + [P(x, ins, bulletText="\u2022") for x in spec["insights"]]
     buf = io.BytesIO()
-    SimpleDocTemplate(buf, pagesize=A4, leftMargin=2 * cm, rightMargin=2 * cm, topMargin=2 * cm, bottomMargin=1.8 * cm,
-                      title=spec["title"], author="AI Assistant").build(story, onFirstPage=_footer, onLaterPages=_footer)
+    SimpleDocTemplate(buf, pagesize=A4, leftMargin=2 * cm, rightMargin=2 * cm, topMargin=2 * cm, bottomMargin=2.1 * cm,
+                      title=spec["title"], author="AI Assistant").build(story, onFirstPage=_page, onLaterPages=_page)
     pdf = buf.getvalue()
     if len(pdf) > MAX_PDF_BYTES:
         raise BadSpec("too big")

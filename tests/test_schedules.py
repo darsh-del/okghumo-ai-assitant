@@ -487,3 +487,7 @@ def test_pdf_long_labels_kept_and_long_kpis_render():
                         '"charts":[{"type":"bar","title":"t","labels":["Walk-in discounted Oct","Walk-in discounted Nov"],"values":[1,2]}]}')
     assert s["charts"][0]["labels"][0] == "Walk-in discounted Oct"  # not cut to a few characters
     assert pdfreport.render(s).startswith(b"%PDF")
+
+
+def test_pdf_indian_number_grouping_for_chart_values():
+    assert [pdfreport._inr(v) for v in (2500000, 12345678, 950, -4200, 0.5)] == ["25,00,000", "1,23,45,678", "950", "-4,200", "0.5"]
