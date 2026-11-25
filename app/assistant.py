@@ -11,6 +11,7 @@ from app.rbac import mcp_toolset
 
 log = logging.getLogger("assistant")
 
+MAX_PAUSES = 5  # continuations when the server-side tool loop pauses a long turn (stop_reason "pause_turn")
 MAX_STEPS = 4  # model <-> our-own-tool round trips per request (MCP tool calls run server-side, not counted)
 
 SYSTEM = (
@@ -98,25 +99,42 @@ def ask(client, role: str | None, mcp_access_token: str, messages: list[dict], s
     tools = [toolset] + (extra.tools if extra else [])
     msgs, used, results_text = list(messages), [], []
     t0 = time.time()
-    for step in range(1, MAX_STEPS + 1):
-        r = client.beta.messages.create(
+
+    def create(m):
+        return client.beta.messages.create(
             model=model or os.environ.get("CHAT_MODEL", "claude-opus-5-5"),
             max_tokens=max_tokens or int(os.environ.get("MAX_REPLY_TOKENS", "2000")),  # answers are short; 16000 only raised cost
             betas=["mcp-client-2025-11-20"],
             system=system,
-            messages=msgs,
+            messages=m,
             mcp_servers=[server],
             tools=tools,
         )
-        used += [b.name for b in r.content if b.type == "mcp_tool_use"]
-        results_text += [_text_of(b) for b in r.content if b.type == "mcp_tool_result"]
-        calls = [b for b in r.content if b.type == "tool_use"]
+
+    def note(r, step):
+        used.extend(b.name for b in r.content if b.type == "mcp_tool_use")
+        results_text.extend(_text_of(b) for b in r.content if b.type == "mcp_tool_result")
         u = getattr(r, "usage", None)
         logs.event(log, "model_call", step=step, role=role, stop=getattr(r, "stop_reason", None),
                    mcp_tools=",".join(b.name for b in r.content if b.type == "mcp_tool_use") or None,
-                   app_tools=",".join(b.name for b in calls) or None,
+                   app_tools=",".join(b.name for b in r.content if b.type == "tool_use") or None,
                    tokens_in=getattr(u, "input_tokens", None), tokens_out=getattr(u, "output_tokens", None),
                    ms=int((time.time() - t0) * 1000))
+
+    for step in range(1, MAX_STEPS + 1):
+        r, cont, pauses = create(msgs), msgs, 0
+        while True:
+            note(r, step)
+            if getattr(r, "stop_reason", None) != "pause_turn" or pauses >= MAX_PAUSES:
+                break
+            try:  # documented way to go on: send the paused content back as-is, same tools, no new user message
+                cont = cont + [{"role": "assistant", "content": [_dump(b) for b in r.content]}]
+                r = create(cont)
+            except Exception as e:  # keep the old behaviour (use what we have) rather than failing the request
+                logs.event(log, "pause_continue_failed", logging.WARNING, error=type(e).__name__)
+                break
+            pauses += 1
+        calls = [b for b in r.content if b.type == "tool_use"]
         if not (extra and calls):
             break
         results = []
@@ -124,7 +142,7 @@ def ask(client, role: str | None, mcp_access_token: str, messages: list[dict], s
             out = extra.call(b.name, b.input)
             results.append({"type": "tool_result", "tool_use_id": b.id, "content": out,
                             **({"is_error": True} if out.startswith("error:") else {})})
-        msgs += [{"role": "assistant", "content": [_dump(b) for b in r.content]}, {"role": "user", "content": results}]
+        msgs = cont + [{"role": "assistant", "content": [_dump(b) for b in r.content]}, {"role": "user", "content": results}]  # cont = msgs + any paused parts
     reply = "".join(b.text for b in r.content if b.type == "text")
     if used and reply:  # accuracy watch: log how many big numbers in the reply were NOT in any tool result
         bad = ungrounded(reply, results_text)

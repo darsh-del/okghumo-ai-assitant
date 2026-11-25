@@ -6,6 +6,7 @@ letters). Nothing here touches Okghumo or the network, and nothing is logged.
 """
 import io
 import json
+import logging
 import os
 import re
 from datetime import datetime
@@ -23,7 +24,9 @@ from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import cm
 from reportlab.platypus import HRFlowable, KeepTogether, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
-from app import assistant
+from app import assistant, logs
+
+log = logging.getLogger("pdfreport")
 
 MAX_PDF_BYTES = 2_000_000
 BRAND = "#EB493A"  # the PDF theme: this orange-red on white. Change here only.
@@ -44,7 +47,7 @@ SPEC_PROMPT = (
     "Use Roman letters only. Omit a key if there is no data for it."
 )
 
-PDF_TOKENS = 4000
+PDF_TOKENS = int(os.environ.get("PDF_MAX_TOKENS", 8000))  # a 12-month report with tables and charts is long JSON; 4000 cut it off
 PDF_SYSTEM = (
     assistant.SYSTEM + " This request becomes a detailed PDF report: nobody can answer follow-up questions, so never "
     "ask any. Today is {today} (timezone {tz}); resolve 'yesterday', 'this week', 'last 7 days' etc. from that date. "
@@ -66,20 +69,38 @@ def _s(x, n: int = 200) -> str:
 
 
 def _num(x) -> float | None:
+    if isinstance(x, str):  # "2,302" / "Rs. 1,200" / "45%" exactly as the data shows it: same number, just typed as text
+        try:
+            x = float(re.sub(r"(?i)^\s*(rs\.?|inr|\u20b9)\s*|,|\s*%\s*$", "", x.strip()))
+        except ValueError:
+            return None
     if isinstance(x, bool) or not isinstance(x, (int, float)) or x != x or abs(x) > 1e15:
         return None
     return float(x)
 
 
+_KEYS = ("title", "summary", "kpis", "charts", "tables", "insights")
+
+
+def _first_object(raw: str) -> dict | None:
+    """The first JSON object in the model's text that looks like a report. Tolerates a sentence before/after it and
+    stray braces in that sentence (the old first-{-to-last-} slice broke on those)."""
+    dec = json.JSONDecoder()
+    for m in list(re.finditer(r"\{", raw or ""))[:60]:
+        try:
+            j, _ = dec.raw_decode(raw[m.start():])
+        except ValueError:
+            continue
+        if isinstance(j, dict) and any(k in j for k in _KEYS):
+            return j
+    return None
+
+
 def parse(raw: str) -> dict:
     """Model text -> clean spec. BadSpec if it is not JSON or has nothing worth printing."""
-    m = re.search(r"\{.*\}", raw or "", re.S)
-    try:
-        j = json.loads(m.group(0)) if m else None
-    except ValueError:
-        j = None
-    if not isinstance(j, dict):
-        raise BadSpec("not json")
+    j = _first_object(raw)
+    if j is None:
+        raise BadSpec("not_json" if (raw or "").strip() else "empty_reply")
     lst = lambda k, n: [x for x in (j.get(k) if isinstance(j.get(k), list) else [])[:n]]  # noqa: E731
     kpis = [{"label": _s(k.get("label"), 40), "value": _s(k.get("value"), 40)} for k in lst("kpis", 6)
             if isinstance(k, dict) and k.get("label") and k.get("value") not in (None, "")]
@@ -107,7 +128,7 @@ def parse(raw: str) -> dict:
             "summary": _s(j.get("summary"), 700), "kpis": kpis, "charts": charts, "tables": tables,
             "insights": [_s(x, 220) for x in lst("insights", 5) if x]}
     if not (spec["summary"] or kpis or charts or tables):
-        raise BadSpec("empty")
+        raise BadSpec("empty_spec")
     return spec
 
 
@@ -271,12 +292,32 @@ def render(spec: dict, generated: str | None = None) -> bytes:
     return pdf
 
 
+FORMAT_REMINDER = "\n\nReply with ONLY the JSON report object described in the system prompt: no text before or after it."
+COMPACT = " Keep it compact so it fits: at most 2 charts, 1 table of at most 12 rows, 4 insights, short labels."
+
+
 def generate(client, role: str | None, token: str, question: str, tz: str = "Asia/Kolkata") -> tuple[dict, bytes]:
     """Ask the model (read-only MCP tools, THIS vendor's token, no app tools) for a report spec and draw it.
-    Shared by scheduled PDF reports and on-demand ones. BadSpec if the model's answer is unusable."""
+    Shared by scheduled PDF reports and on-demand ones. One compact retry if the first answer is unusable (cut off,
+    prose instead of JSON, empty); BadSpec if the retry fails too. Logs WHY (stop reason, sizes), never the text."""
     now = datetime.now(ZoneInfo(tz))
-    out = assistant.ask(client, role, token, [{"role": "user", "content": question}],
-                        PDF_SYSTEM.replace("{today}", now.strftime("%A %d %B %Y")).replace("{tz}", tz),  # not .format: JSON braces
-                        model=os.environ.get("REPORT_MODEL"), max_tokens=PDF_TOKENS)
-    spec = parse(out["reply"])
+    system = PDF_SYSTEM.replace("{today}", now.strftime("%A %d %B %Y")).replace("{tz}", tz)  # not .format: JSON braces
+
+    def attempt(q: str) -> tuple[dict | None, dict, str | None]:
+        out = assistant.ask(client, role, token, [{"role": "user", "content": q}], system,
+                            model=os.environ.get("REPORT_MODEL"), max_tokens=PDF_TOKENS)
+        try:
+            return parse(out["reply"]), out, None
+        except BadSpec as e:
+            return None, out, str(e)
+
+    spec, out, why = attempt(question + FORMAT_REMINDER)
+    if spec is None:
+        logs.event(log, "pdf_spec_retry", logging.WARNING, reason=why, stop=out["stop_reason"], reply_chars=len(out["reply"]),
+                   mcp_calls=len(out["tools_used"]))
+        spec, out, why = attempt(question + FORMAT_REMINDER + COMPACT)
+        if spec is None:
+            logs.event(log, "pdf_spec_failed", logging.ERROR, reason=why, stop=out["stop_reason"], reply_chars=len(out["reply"]),
+                       mcp_calls=len(out["tools_used"]))
+            raise BadSpec(why)
     return spec, render(spec, now.strftime("%d %b %Y, %H:%M"))

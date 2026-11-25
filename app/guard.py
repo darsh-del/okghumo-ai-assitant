@@ -21,7 +21,7 @@ DOMAIN = re.compile(
 # clearly unrelated asks (only blocks when no DOMAIN word is present)
 OFFTOPIC = re.compile(
     r"\b(poem|poetry|story|song|lyrics|joke|riddle|recipe|weather|horoscope|astrology|movie|film|cricket|football|"
-    r"ipl|politic\w*|election|prime minister|president|bitcoin|crypto\w*|stocks?|shares?|forex|translate|essay|"
+    r"ipl|politic\w*|election|prime minister|president|bitcoin|crypto\w*|stocks?|(share|shares) (price|prices|market)|share market|forex|translate|essay|"
     r"homework|math problem|equation|chatgpt|openai|gemini|llama|medical|doctor|diagnos\w*|symptom\w*|lawyer|"
     r"relationship|girlfriend|boyfriend|dating|python|javascript|java|c\+\+|sql|html|css|code|coding|script|"
     r"program|algorithm|capital of|who (is|was|invented)|meaning of life|write me|tell me about yourself)\b", re.I)

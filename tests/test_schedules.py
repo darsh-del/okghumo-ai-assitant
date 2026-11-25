@@ -460,8 +460,8 @@ def test_on_demand_pdf_tool_creates_pdf_for_owner_only_readonly_nested_call():
 
 
 def test_on_demand_pdf_failure_and_daily_cap_and_kill_switch(monkeypatch):
-    out, f = chat("OF", ASK, Fake([tool("create_pdf_report", {"question": "x"})], [text("not json")], [text("Sorry, here are the figures.")]))
-    assert "pdf_id" not in out and "error" in str(f.calls[2]["messages"][-1]["content"])
+    out, f = chat("OF", ASK, Fake([tool("create_pdf_report", {"question": "x"})], [text("not json")], [text("still not json")], [text("Sorry, here are the figures.")]))
+    assert "pdf_id" not in out and "error" in str(f.calls[3]["messages"][-1]["content"])  # call 2 = nested, 3 = its one retry
     monkeypatch.setenv("RATE_PDF_PER_DAY", "1")
     chat("OC", ASK, Fake([tool("create_pdf_report", {"question": "x"})], [text(SPEC)], [text("ok")]))
     out, f = chat("OC", ASK, Fake([tool("create_pdf_report", {"question": "x"})], [text("never used")]))
@@ -491,3 +491,66 @@ def test_pdf_long_labels_kept_and_long_kpis_render():
 
 def test_pdf_indian_number_grouping_for_chart_values():
     assert [pdfreport._inr(v) for v in (2500000, 12345678, 950, -4200, 0.5)] == ["25,00,000", "1,23,45,678", "950", "-4,200", "0.5"]
+
+
+# ---------- why PDFs failed on WhatsApp: paused turns, cut-off JSON, prose instead of JSON, the "share" guard bug ----------
+class Seq:
+    """Scripted model that also sets stop_reason, like the real API (pause_turn / max_tokens / end_turn)."""
+    def __init__(self, *script):
+        self.script, self.calls = list(script), []
+        self.beta = NS(messages=NS(create=self._create))
+
+    def _create(self, **kw):
+        self.calls.append(kw)
+        stop, blocks = self.script.pop(0) if self.script else ("end_turn", [text("ok")])
+        if isinstance(blocks, Exception):
+            raise blocks
+        return NS(stop_reason=stop, content=blocks)
+
+
+def gen(client):
+    return pdfreport.generate(client, "vendor", "mcp-tok", "Monthly comparison, last 12 months")
+
+
+def test_paused_turn_is_continued_not_treated_as_a_failure():
+    mcp = NS(type="mcp_tool_use", id="m1", name="get_analysis_summary", input={}, server_name="okghumo")
+    res = NS(type="mcp_tool_result", tool_use_id="m1", content=[NS(text="data")], is_error=False)
+    s = Seq(("pause_turn", [text("Let me gather the months."), mcp, res]), ("end_turn", [text(SPEC)]))
+    spec, pdf = gen(s)
+    assert pdf.startswith(b"%PDF") and spec["title"] == "Weekly sales" and len(s.calls) == 2
+    cont = s.calls[1]["messages"]
+    assert cont[-1]["role"] == "assistant" and cont[-1]["content"][1]["name"] == "get_analysis_summary"  # paused part sent back
+    assert s.calls[1]["tools"] == s.calls[0]["tools"] and s.calls[1]["mcp_servers"] == s.calls[0]["mcp_servers"]
+
+
+def test_pause_continuation_error_falls_back_to_old_behaviour_no_crash():
+    s = Seq(("pause_turn", [text("partial answer")]), ("end_turn", RuntimeError("api down")))
+    out = assistant.ask(s, "vendor", "tok", [user("hi")])
+    assert out["reply"] == "partial answer" and out["stop_reason"] == "pause_turn"
+
+
+def test_cut_off_json_is_retried_compact_with_bigger_budget():
+    s = Seq(("max_tokens", [text(SPEC[:150])]), ("end_turn", [text(SPEC)]))
+    spec, pdf = gen(s)
+    assert pdf.startswith(b"%PDF") and len(s.calls) == 2
+    assert s.calls[0]["max_tokens"] == pdfreport.PDF_TOKENS >= 8000 and "compact" in s.calls[1]["messages"][-1]["content"]
+    assert "ONLY the JSON" in s.calls[0]["messages"][-1]["content"]  # the format reminder is in the user turn too
+
+
+def test_prose_answer_is_retried_and_two_failures_raise_badspec():
+    s = Seq(("end_turn", [text("Here is your report in words: June was busiest.")]), ("end_turn", [text(SPEC)]))
+    assert gen(s)[1].startswith(b"%PDF") and len(s.calls) == 2
+    with pytest.raises(pdfreport.BadSpec):
+        gen(Seq(("end_turn", [text("prose")]), ("end_turn", [text("more prose")])))
+
+
+def test_parse_tolerates_narration_braces_and_numbers_typed_as_text():
+    raw = 'Sure {as asked}. ' + '{"summary":"x","charts":[{"type":"bar","title":"t","labels":["a","b"],"values":["2,302","Rs. 1,200"]}]} Done {ok}'
+    assert pdfreport.parse(raw)["charts"][0]["values"] == [2302.0, 1200.0]
+
+
+def test_guard_no_longer_blocks_everyday_share_but_still_blocks_stock_talk():
+    from app import guard
+    ok = lambda t: guard.classify([{"role": "user", "content": t}])  # noqa: E731
+    assert ok("Ok share it") is None and ok("share the report with me") is None
+    assert ok("what is the share price of tata")[0] == "off_topic" and ok("which stocks should I buy")[0] == "off_topic"
