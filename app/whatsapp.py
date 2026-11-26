@@ -119,15 +119,33 @@ def react(to: str, wamid: str, emoji: str) -> None:
 
 PDF_WORDS = re.compile(r"\bpdf\b", re.I)
 
+# Fixed, business-safe reaction set. First matching rule wins; upset messages only ever get a calm 🙏. Never model-chosen.
+REACTIONS = [
+    (re.compile(r"problem|issue|not working|wrong|error|complain|angry|upset|bad|worst|nahi aaya|galat", re.I), ["🙏"]),
+    (re.compile(r"thank|thanks|thx|shukriya|dhanyavad|aabhar|abhar", re.I), ["🙏", "😊"]),
+    (re.compile(r"^\W*(hi|hello|hey|namaste|namaskar|kem cho|good (morning|afternoon|evening))\b", re.I), ["👋", "😊"]),
+    (re.compile(r"congrat|great|awesome|excellent|superb|amazing|wow|badhai|mast", re.I), ["🎉", "🙌", "😊"]),
+    (re.compile(r"\bpdf\b|report", re.I), ["📄", "👍", "✅"]),
+    (re.compile(r"sales?|revenue|booking|collection|growth|trend|compar", re.I), ["📈", "👍", "👌"]),
+]
+DEFAULT_REACTIONS = ["👍", "👌", "😊"]
 
-def _maybe_react(phone: str, wamid: str, why: str, chance: float = 1 / 2) -> bool:
-    """Cosmetic 👍 with the given chance (PDF messages 1/2, other messages 1/4), never required and never raises. The outcome is logged (never any text) so a
+
+def pick_reaction(text: str) -> str:
+    for rx, pool in REACTIONS:
+        if rx.search(text or ""):
+            return random.choice(pool)
+    return random.choice(DEFAULT_REACTIONS)
+
+
+def _maybe_react(phone: str, wamid: str, why: str, chance: float = 1 / 2, text: str = "") -> bool:
+    """Cosmetic reaction (see pick_reaction) with the given chance (PDF messages 1/2, other messages 1/4), never required and never raises. The outcome is logged (never any text) so a
     missing reaction is explainable: skipped_dice = the roll said no, sent = Meta accepted it, failed = Meta refused."""
     if random.random() >= chance:
         logs.event(log, "reaction", phone=logs.mask_phone(phone), why=why, outcome="skipped_dice")
         return False
     try:
-        react(phone, wamid, "👍")
+        react(phone, wamid, pick_reaction(text))
         logs.event(log, "reaction", phone=logs.mask_phone(phone), why=why, outcome="sent")
         return True
     except Exception as e:
@@ -238,7 +256,7 @@ def _answer(phone: str, text: str, wamid: str, voice: bool = False) -> None:
     except Exception:
         pass  # cosmetic
     asked_pdf = bool(PDF_WORDS.search(text))
-    reacted = _maybe_react(phone, wamid, "pdf_word", 1 / 2) if asked_pdf else _maybe_react(phone, wamid, "chat", 1 / 4)
+    reacted = _maybe_react(phone, wamid, "pdf_word", 1 / 2, text) if asked_pdf else _maybe_react(phone, wamid, "chat", 1 / 4, text)
     vendor, msgs = "wa:" + phone, _messages(phone) + [{"role": "user", "content": text}]  # own namespace per phone
     if voice:  # a mis-heard word must never confirm or cancel anything: only TYPED yes/no acts on a proposal
         if len(msgs) > 1 and schedules.MARK in msgs[-2]["content"] and schedules._norm(text) in schedules.YES | schedules.NO:
@@ -278,7 +296,7 @@ def _answer(phone: str, text: str, wamid: str, voice: bool = False) -> None:
             send(phone, "Sorry, I couldn't attach the PDF just now. Please ask me again in a minute, or I can share the key figures here.")
         else:
             if not asked_pdf and not reacted:  # no "pdf" in the message (e.g. "and another of the months sales"), but one was sent
-                _maybe_react(phone, wamid, "pdf_sent", 1 / 2)
+                _maybe_react(phone, wamid, "pdf_sent", 1 / 2, text)
 
 
 # ---- scheduled delivery ----

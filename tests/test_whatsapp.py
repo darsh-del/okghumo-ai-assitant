@@ -101,11 +101,12 @@ def test_pdf_mention_sometimes_gets_thumbs_up_reaction(env, monkeypatch):
     graphed = []
     monkeypatch.setattr(w, "_graph", lambda p: graphed.append(p))
 
+    monkeypatch.setattr(w.random, "choice", lambda seq: seq[0])
     monkeypatch.setattr(w.random, "random", lambda: 0.1)  # inside the 1/3 chance
     post("can I get a pdf report", wamid="m1")
     reactions = [p for p in graphed if p.get("type") == "reaction"]
     assert reactions == [{"to": "919800000001", "type": "reaction",
-                          "reaction": {"message_id": "m1", "emoji": "👍"}}]
+                          "reaction": {"message_id": "m1", "emoji": "📄"}}]
 
     graphed.clear()
     monkeypatch.setattr(w.random, "random", lambda: 0.9)  # outside the 1/3 chance
@@ -614,3 +615,14 @@ def test_reaction_outcomes_are_logged_and_pdf_sent_also_reacts(docs, monkeypatch
     monkeypatch.setattr(w, "_graph", boom)
     post("one more pdf", wamid="m11")
     assert 'outcome=failed' in logged() and "ConnectError" in logged()
+
+
+def test_reaction_follows_the_message_and_stays_professional(monkeypatch):
+    monkeypatch.setattr(w.random, "choice", lambda seq: seq[0])
+    assert w.pick_reaction("thank you so much") == "🙏"
+    assert w.pick_reaction("hello") == "👋"
+    assert w.pick_reaction("there is a problem with my sales") == "🙏"  # upset never gets a cheerful one
+    assert w.pick_reaction("send the pdf") == "📄" and w.pick_reaction("sales today") == "📈"
+    assert w.pick_reaction("awesome work") == "🎉" and w.pick_reaction("something else") == "👍"
+    allowed = {e for _, pool in w.REACTIONS for e in pool} | set(w.DEFAULT_REACTIONS)
+    assert allowed <= set("👍👌🙏😊🎉🙌👋📄✅📈")
