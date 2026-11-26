@@ -113,9 +113,15 @@ def test_pdf_mention_sometimes_gets_thumbs_up_reaction(env, monkeypatch):
     assert not [p for p in graphed if p.get("type") == "reaction"]
 
     graphed.clear()
-    monkeypatch.setattr(w.random, "random", lambda: 0.1)
-    post("what are my sales", wamid="m3")  # no "pdf" mention: never reacts, even in-chance
+    monkeypatch.setattr(w.random, "random", lambda: 0.4)  # inside PDF's 1/2, outside others' 1/4
+    post("a pdf again", wamid="m4")
+    assert [p["reaction"]["message_id"] for p in graphed if p.get("type") == "reaction"] == ["m4"]
+    graphed.clear()
+    post("what are my sales", wamid="m3")  # other messages react less often (1/4)
     assert not [p for p in graphed if p.get("type") == "reaction"]
+    monkeypatch.setattr(w.random, "random", lambda: 0.1)
+    post("what are my bookings", wamid="m5")
+    assert [p["reaction"]["message_id"] for p in graphed if p.get("type") == "reaction"] == ["m5"]
 
 
 def test_follow_up_keeps_same_vendor_context(env):
@@ -590,7 +596,7 @@ def test_reaction_outcomes_are_logged_and_pdf_sent_also_reacts(docs, monkeypatch
     caplog.set_level("INFO")
     logged = lambda: caplog.text.replace('"', '')  # the log formatter quotes some values, not others  # noqa: E731
     # a PDF is actually sent although the message never says "pdf": still eligible for the 👍
-    monkeypatch.setattr(w.random, "random", lambda: 0.1)
+    monkeypatch.setattr(w.random, "random", lambda: 0.4)  # misses the 1/4 chat roll, hits the 1/2 pdf_sent roll
     docs.model = Script([NS(type="tool_use", id="t", name="create_pdf_report", input={"question": "q"})], [T(SPECJ)], [T("Ready!")])
     post("and another of the months sales please", wamid="m9")
     assert [p["reaction"]["message_id"] for p in graphed if p.get("type") == "reaction"] == ["m9"] and docs.docs

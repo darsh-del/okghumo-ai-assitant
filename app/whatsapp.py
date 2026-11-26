@@ -120,16 +120,19 @@ def react(to: str, wamid: str, emoji: str) -> None:
 PDF_WORDS = re.compile(r"\bpdf\b", re.I)
 
 
-def _maybe_react(phone: str, wamid: str, why: str) -> None:
-    """Cosmetic 👍 with a one-in-three chance, never required and never raises. The outcome is logged (never any text) so a
-    missing reaction is explainable: skipped_dice = the 1/3 roll said no, sent = Meta accepted it, failed = Meta refused."""
-    if random.random() >= 1 / 3:
-        return logs.event(log, "reaction", phone=logs.mask_phone(phone), why=why, outcome="skipped_dice")
+def _maybe_react(phone: str, wamid: str, why: str, chance: float = 1 / 2) -> bool:
+    """Cosmetic 👍 with the given chance (PDF messages 1/2, other messages 1/4), never required and never raises. The outcome is logged (never any text) so a
+    missing reaction is explainable: skipped_dice = the roll said no, sent = Meta accepted it, failed = Meta refused."""
+    if random.random() >= chance:
+        logs.event(log, "reaction", phone=logs.mask_phone(phone), why=why, outcome="skipped_dice")
+        return False
     try:
         react(phone, wamid, "👍")
         logs.event(log, "reaction", phone=logs.mask_phone(phone), why=why, outcome="sent")
+        return True
     except Exception as e:
         logs.event(log, "reaction", logging.WARNING, phone=logs.mask_phone(phone), why=why, outcome="failed", error=type(e).__name__)
+        return False
 
 
 def send_pdf(to: str, pdf: bytes, title: str, caption: str) -> None:
@@ -235,8 +238,7 @@ def _answer(phone: str, text: str, wamid: str, voice: bool = False) -> None:
     except Exception:
         pass  # cosmetic
     asked_pdf = bool(PDF_WORDS.search(text))
-    if asked_pdf:
-        _maybe_react(phone, wamid, "pdf_word")  # the vendor mentioned a pdf
+    reacted = _maybe_react(phone, wamid, "pdf_word", 1 / 2) if asked_pdf else _maybe_react(phone, wamid, "chat", 1 / 4)
     vendor, msgs = "wa:" + phone, _messages(phone) + [{"role": "user", "content": text}]  # own namespace per phone
     if voice:  # a mis-heard word must never confirm or cancel anything: only TYPED yes/no acts on a proposal
         if len(msgs) > 1 and schedules.MARK in msgs[-2]["content"] and schedules._norm(text) in schedules.YES | schedules.NO:
@@ -275,8 +277,8 @@ def _answer(phone: str, text: str, wamid: str, voice: bool = False) -> None:
             logs.event(log, "delivery_failed", logging.ERROR, phone=logs.mask_phone(phone), via="pdf", error=type(e).__name__)
             send(phone, "Sorry, I couldn't attach the PDF just now. Please ask me again in a minute, or I can share the key figures here.")
         else:
-            if not asked_pdf:  # the vendor didn't say "pdf" (e.g. "and another of the months sales"), but one was just sent
-                _maybe_react(phone, wamid, "pdf_sent")
+            if not asked_pdf and not reacted:  # no "pdf" in the message (e.g. "and another of the months sales"), but one was sent
+                _maybe_react(phone, wamid, "pdf_sent", 1 / 2)
 
 
 # ---- scheduled delivery ----
