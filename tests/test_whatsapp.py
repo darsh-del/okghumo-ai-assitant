@@ -96,6 +96,28 @@ def test_two_vendors_never_share_token_or_history(env):
     assert all("A secret" not in m["content"] for m in b["messages"])
 
 
+def test_pdf_mention_sometimes_gets_thumbs_up_reaction(env, monkeypatch):
+    env.tokens["919800000001"] = {"role": "vendor", "mcpAccessToken": "t"}
+    graphed = []
+    monkeypatch.setattr(w, "_graph", lambda p: graphed.append(p))
+
+    monkeypatch.setattr(w.random, "random", lambda: 0.1)  # inside the 1/3 chance
+    post("can I get a pdf report", wamid="m1")
+    reactions = [p for p in graphed if p.get("type") == "reaction"]
+    assert reactions == [{"to": "919800000001", "type": "reaction",
+                          "reaction": {"message_id": "m1", "emoji": "👍"}}]
+
+    graphed.clear()
+    monkeypatch.setattr(w.random, "random", lambda: 0.9)  # outside the 1/3 chance
+    post("another pdf please", wamid="m2")
+    assert not [p for p in graphed if p.get("type") == "reaction"]
+
+    graphed.clear()
+    monkeypatch.setattr(w.random, "random", lambda: 0.1)
+    post("what are my sales", wamid="m3")  # no "pdf" mention: never reacts, even in-chance
+    assert not [p for p in graphed if p.get("type") == "reaction"]
+
+
 def test_follow_up_keeps_same_vendor_context(env):
     env.tokens["919800000001"] = {"role": "vendor", "mcpAccessToken": "t"}
     post("first"); post("second")

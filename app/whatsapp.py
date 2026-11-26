@@ -13,6 +13,7 @@ import hmac
 import json
 import logging
 import os
+import random
 import re
 import threading
 import time
@@ -110,6 +111,13 @@ def _graph(payload: dict) -> None:
 def send(to: str, text: str) -> None:
     for i in range(0, max(len(text), 1), 4000):  # WhatsApp text limit is 4096
         _graph({"to": to, "type": "text", "text": {"body": text[i:i + 4000]}})
+
+
+def react(to: str, wamid: str, emoji: str) -> None:
+    _graph({"to": to, "type": "reaction", "reaction": {"message_id": wamid, "emoji": emoji}})
+
+
+PDF_WORDS = re.compile(r"\bpdf\b", re.I)
 
 
 def send_pdf(to: str, pdf: bytes, title: str, caption: str) -> None:
@@ -214,6 +222,11 @@ def _answer(phone: str, text: str, wamid: str, voice: bool = False) -> None:
         _graph({"status": "read", "message_id": wamid, "typing_indicator": {"type": "text"}})
     except Exception:
         pass  # cosmetic
+    if PDF_WORDS.search(text) and random.random() < 1 / 3:  # cosmetic flourish, never required
+        try:
+            react(phone, wamid, "👍")
+        except Exception:
+            pass
     vendor, msgs = "wa:" + phone, _messages(phone) + [{"role": "user", "content": text}]  # own namespace per phone
     if voice:  # a mis-heard word must never confirm or cancel anything: only TYPED yes/no acts on a proposal
         if len(msgs) > 1 and schedules.MARK in msgs[-2]["content"] and schedules._norm(text) in schedules.YES | schedules.NO:
