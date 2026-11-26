@@ -588,17 +588,18 @@ def test_reaction_outcomes_are_logged_and_pdf_sent_also_reacts(docs, monkeypatch
     graphed = []
     monkeypatch.setattr(w, "_graph", lambda p: graphed.append(p))
     caplog.set_level("INFO")
+    logged = lambda: caplog.text.replace('"', '')  # the log formatter quotes some values, not others  # noqa: E731
     # a PDF is actually sent although the message never says "pdf": still eligible for the 👍
     monkeypatch.setattr(w.random, "random", lambda: 0.1)
     docs.model = Script([NS(type="tool_use", id="t", name="create_pdf_report", input={"question": "q"})], [T(SPECJ)], [T("Ready!")])
     post("and another of the months sales please", wamid="m9")
     assert [p["reaction"]["message_id"] for p in graphed if p.get("type") == "reaction"] == ["m9"] and docs.docs
-    assert 'outcome="sent"' in caplog.text and 'why="pdf_sent"' in caplog.text
+    assert 'outcome=sent' in logged() and 'why=pdf_sent' in logged()
     # the dice say no: nothing sent, but the skip is logged
     graphed.clear(); caplog.clear()
     monkeypatch.setattr(w.random, "random", lambda: 0.9)
     post("a pdf please", wamid="m10")
-    assert not [p for p in graphed if p.get("type") == "reaction"] and 'outcome="skipped_dice"' in caplog.text
+    assert not [p for p in graphed if p.get("type") == "reaction"] and 'outcome=skipped_dice' in logged()
     # Meta refuses the reaction: the reply still goes out, and the failure is logged (type only)
     caplog.clear()
     monkeypatch.setattr(w.random, "random", lambda: 0.1)
@@ -606,4 +607,4 @@ def test_reaction_outcomes_are_logged_and_pdf_sent_also_reacts(docs, monkeypatch
         if p.get("type") == "reaction": raise httpx.ConnectError("x")
     monkeypatch.setattr(w, "_graph", boom)
     post("one more pdf", wamid="m11")
-    assert 'outcome="failed"' in caplog.text and "ConnectError" in caplog.text
+    assert 'outcome=failed' in logged() and "ConnectError" in logged()
