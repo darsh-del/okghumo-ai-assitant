@@ -120,6 +120,18 @@ def react(to: str, wamid: str, emoji: str) -> None:
 PDF_WORDS = re.compile(r"\bpdf\b", re.I)
 
 
+def _maybe_react(phone: str, wamid: str, why: str) -> None:
+    """Cosmetic 👍 with a one-in-three chance, never required and never raises. The outcome is logged (never any text) so a
+    missing reaction is explainable: skipped_dice = the 1/3 roll said no, sent = Meta accepted it, failed = Meta refused."""
+    if random.random() >= 1 / 3:
+        return logs.event(log, "reaction", phone=logs.mask_phone(phone), why=why, outcome="skipped_dice")
+    try:
+        react(phone, wamid, "👍")
+        logs.event(log, "reaction", phone=logs.mask_phone(phone), why=why, outcome="sent")
+    except Exception as e:
+        logs.event(log, "reaction", logging.WARNING, phone=logs.mask_phone(phone), why=why, outcome="failed", error=type(e).__name__)
+
+
 def send_pdf(to: str, pdf: bytes, title: str, caption: str) -> None:
     """Upload our own generated PDF to Meta, then send it as a document (caption max 1024). Never a vendor-supplied file."""
     base = f"https://graph.facebook.com/{os.environ.get('WHATSAPP_API_VERSION', 'v23.0')}/{os.environ['WHATSAPP_PHONE_NUMBER_ID']}"
@@ -222,11 +234,9 @@ def _answer(phone: str, text: str, wamid: str, voice: bool = False) -> None:
         _graph({"status": "read", "message_id": wamid, "typing_indicator": {"type": "text"}})
     except Exception:
         pass  # cosmetic
-    if PDF_WORDS.search(text) and random.random() < 1 / 3:  # cosmetic flourish, never required
-        try:
-            react(phone, wamid, "👍")
-        except Exception:
-            pass
+    asked_pdf = bool(PDF_WORDS.search(text))
+    if asked_pdf:
+        _maybe_react(phone, wamid, "pdf_word")  # the vendor mentioned a pdf
     vendor, msgs = "wa:" + phone, _messages(phone) + [{"role": "user", "content": text}]  # own namespace per phone
     if voice:  # a mis-heard word must never confirm or cancel anything: only TYPED yes/no acts on a proposal
         if len(msgs) > 1 and schedules.MARK in msgs[-2]["content"] and schedules._norm(text) in schedules.YES | schedules.NO:
@@ -264,6 +274,9 @@ def _answer(phone: str, text: str, wamid: str, voice: bool = False) -> None:
         except Exception as e:
             logs.event(log, "delivery_failed", logging.ERROR, phone=logs.mask_phone(phone), via="pdf", error=type(e).__name__)
             send(phone, "Sorry, I couldn't attach the PDF just now. Please ask me again in a minute, or I can share the key figures here.")
+        else:
+            if not asked_pdf:  # the vendor didn't say "pdf" (e.g. "and another of the months sales"), but one was just sent
+                _maybe_react(phone, wamid, "pdf_sent")
 
 
 # ---- scheduled delivery ----

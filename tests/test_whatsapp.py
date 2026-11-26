@@ -582,3 +582,28 @@ def test_wa_scheduled_pdf_report_is_delivered_as_document_then_held_if_window_cl
     assert dbrun("SELECT sent FROM inbox")[0]["sent"] == 0 and not docs.docs
     post("hello")  # vendor writes: window open again
     assert len(docs.docs) == 1 and dbrun("SELECT sent FROM inbox")[0]["sent"] == 1
+
+
+def test_reaction_outcomes_are_logged_and_pdf_sent_also_reacts(docs, monkeypatch, caplog):
+    graphed = []
+    monkeypatch.setattr(w, "_graph", lambda p: graphed.append(p))
+    caplog.set_level("INFO")
+    # a PDF is actually sent although the message never says "pdf": still eligible for the 👍
+    monkeypatch.setattr(w.random, "random", lambda: 0.1)
+    docs.model = Script([NS(type="tool_use", id="t", name="create_pdf_report", input={"question": "q"})], [T(SPECJ)], [T("Ready!")])
+    post("and another of the months sales please", wamid="m9")
+    assert [p["reaction"]["message_id"] for p in graphed if p.get("type") == "reaction"] == ["m9"] and docs.docs
+    assert 'outcome="sent"' in caplog.text and 'why="pdf_sent"' in caplog.text
+    # the dice say no: nothing sent, but the skip is logged
+    graphed.clear(); caplog.clear()
+    monkeypatch.setattr(w.random, "random", lambda: 0.9)
+    post("a pdf please", wamid="m10")
+    assert not [p for p in graphed if p.get("type") == "reaction"] and 'outcome="skipped_dice"' in caplog.text
+    # Meta refuses the reaction: the reply still goes out, and the failure is logged (type only)
+    caplog.clear()
+    monkeypatch.setattr(w.random, "random", lambda: 0.1)
+    def boom(p):
+        if p.get("type") == "reaction": raise httpx.ConnectError("x")
+    monkeypatch.setattr(w, "_graph", boom)
+    post("one more pdf", wamid="m11")
+    assert 'outcome="failed"' in caplog.text and "ConnectError" in caplog.text
