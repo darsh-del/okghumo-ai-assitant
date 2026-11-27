@@ -1,6 +1,7 @@
 """Vendor isolation for everything scheduled: reminders, reports, proposals, inbox, WhatsApp delivery.
 One vendor's schedules, tokens, reports and chat context must never reach, or be mixed with, another's."""
 import os
+import random
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
@@ -72,6 +73,29 @@ def test_concurrent_runs_in_the_thread_pool_never_mix(monkeypatch):
     ts = [add(v) for v in vs]
     patch_runner(monkeypatch)
     with ThreadPoolExecutor(max_workers=8) as pool:  # same as scheduler.main()
+        scheduler.tick(due_of(*ts), submit=pool.submit)
+    for v in vs:
+        assert [r["body"] for r in inbox_of(v)] == [f"report-for mcp-{v}"], v
+
+
+def test_concurrent_runs_with_timing_jitter_never_mix(monkeypatch):
+    """Stress version of test_concurrent_runs_in_the_thread_pool_never_mix: more vendors, more workers, and a
+    random sleep in both the token mint and the model call, so threads genuinely interleave (finish out of
+    submission order) instead of racing through in lockstep."""
+    vs = [f"J{i}" for i in range(50)]
+    ts = [add(v) for v in vs]
+
+    def jittery_token(v):
+        time.sleep(random.uniform(0, 0.02))
+        return "mcp-" + v
+
+    class JitteryModel(EchoModel):
+        def _create(self, **kw):
+            time.sleep(random.uniform(0, 0.02))
+            return super()._create(**kw)
+
+    patch_runner(monkeypatch, model=JitteryModel(), token=jittery_token)
+    with ThreadPoolExecutor(max_workers=16) as pool:
         scheduler.tick(due_of(*ts), submit=pool.submit)
     for v in vs:
         assert [r["body"] for r in inbox_of(v)] == [f"report-for mcp-{v}"], v
