@@ -153,6 +153,30 @@ def _maybe_react(phone: str, wamid: str, why: str, chance: float = 1 / 2, text: 
         return False
 
 
+def _ambient_react(bg: BackgroundTasks, phone: str, wamid: str, text: str) -> bool:
+    """Roll the cosmetic-reaction dice right when the message arrives — before the coalescing debounce
+    (WA_DEBOUNCE_S, default 5s) and the per-question OkGhumo token mint, which together used to delay every
+    reaction by several seconds. Only the actual Meta send (network) is handed to a background task, so Meta's
+    webhook ack is still immediate. Returns whether a send was scheduled, so _answer()'s pdf-actually-sent
+    catch-up reaction doesn't fire twice for the same message."""
+    asked_pdf = bool(PDF_WORDS.search(text))
+    why, chance = ("pdf_word", 1 / 2) if asked_pdf else ("chat", 1 / 4)
+    if random.random() >= chance:
+        logs.event(log, "reaction", phone=logs.mask_phone(phone), why=why, outcome="skipped_dice")
+        return False
+    emoji = pick_reaction(text)
+
+    def send_it() -> None:
+        try:
+            react(phone, wamid, emoji)
+            logs.event(log, "reaction", phone=logs.mask_phone(phone), why=why, outcome="sent")
+        except Exception as e:
+            logs.event(log, "reaction", logging.WARNING, phone=logs.mask_phone(phone), why=why, outcome="failed", error=type(e).__name__)
+
+    bg.add_task(send_it)
+    return True
+
+
 def send_pdf(to: str, pdf: bytes, title: str, caption: str) -> None:
     """Upload our own generated PDF to Meta, then send it as a document (caption max 1024). Never a vendor-supplied file."""
     base = f"https://graph.facebook.com/{os.environ.get('WHATSAPP_API_VERSION', 'v23.0')}/{os.environ['WHATSAPP_PHONE_NUMBER_ID']}"
@@ -231,7 +255,7 @@ def _redeem(phone: str, code: str) -> None:
     send(phone, "Connected ✅ Ask me about your sales, bookings and collections. Send *STOP* to unlink.")
 
 
-def _answer(phone: str, text: str, wamid: str, voice: bool = False) -> None:
+def _answer(phone: str, text: str, wamid: str, voice: bool = False, reacted: bool = False) -> None:
     if not allow(f"burst:{phone}", int(os.environ.get("RATE_WA_PER_MIN", 6)), 60):  # fast spam: no token mint, no model
         logs.event(log, "rate_limited", logging.WARNING, scope="wa_msg", window="min", phone=logs.mask_phone(phone))
         return send(phone, lang.reply("rate_limited", text))
@@ -255,8 +279,10 @@ def _answer(phone: str, text: str, wamid: str, voice: bool = False) -> None:
         _graph({"status": "read", "message_id": wamid, "typing_indicator": {"type": "text"}})
     except Exception:
         pass  # cosmetic
+    # the ambient reaction (see _ambient_react) already fired, if it was going to, back in the webhook handler —
+    # before this function ever waited on the debounce/token-mint path. `asked_pdf`/`reacted` only gate the
+    # pdf-actually-sent catch-up below.
     asked_pdf = bool(PDF_WORDS.search(text))
-    reacted = _maybe_react(phone, wamid, "pdf_word", 1 / 2, text) if asked_pdf else _maybe_react(phone, wamid, "chat", 1 / 4, text)
     vendor, msgs = "wa:" + phone, _messages(phone) + [{"role": "user", "content": text}]  # own namespace per phone
     if voice:  # a mis-heard word must never confirm or cancel anything: only TYPED yes/no acts on a proposal
         if len(msgs) > 1 and schedules.MARK in msgs[-2]["content"] and schedules._norm(text) in schedules.YES | schedules.NO:
@@ -411,9 +437,9 @@ def _transcribe(phone: str, media_id: str) -> str | None:
     return text
 
 
-def enqueue(phone: str, text: str | None, wamid: str) -> None:
+def enqueue(phone: str, text: str | None, wamid: str, reacted: bool = False) -> None:
     with _plock:
-        _pending.setdefault(phone, []).append((text, wamid))
+        _pending.setdefault(phone, []).append((text, wamid, reacted))
 
 
 def process(phone: str) -> None:
@@ -423,7 +449,7 @@ def process(phone: str) -> None:
         lock = _locks.setdefault(phone, threading.Lock())
     with lock:  # a second task for the same phone waits here, then finds nothing left to do
         with _plock:
-            has_voice = any(w in _voice for _, w in _pending.get(phone, []))
+            has_voice = any(w in _voice for _, w, _ in _pending.get(phone, []))
         time.sleep(0 if has_voice else float(os.environ.get("WA_DEBOUNCE_S", 5)))  # a voice note is a whole thought: no wait
         with _plock:
             batch = _pending.pop(phone, [])
@@ -431,26 +457,27 @@ def process(phone: str) -> None:
             return
         if len(batch) > 1:
             logs.event(log, "wa_coalesced", phone=logs.mask_phone(phone), count=len(batch))
-        items = []  # (text, wamid, came_from_voice)
-        for t, w in batch:
+        items = []  # (text, wamid, came_from_voice, already_reacted)
+        for t, w, reacted in batch:
             if w in _voice:
                 t = _transcribe(phone, _voice.pop(w))
                 if t is None:
                     continue  # the vendor was already told what went wrong
-                items.append((t, w, True))
+                items.append((t, w, True, False))  # transcribed after the fact: no ambient roll happened for it
             else:
-                items.append((t, w, False))
+                items.append((t, w, False, reacted))
         if not items:
             return
-        if any(_is_command(t) for t, _, v in items if not v):  # STOP / LINK-code must stay whole TYPED messages
-            for t, w, v in items:
+        if any(_is_command(t) for t, _, v, _ in items if not v):  # STOP / LINK-code must stay whole TYPED messages
+            for t, w, v, _ in items:
                 handle(phone, t, w, v)
             return
-        texts = [t for t, _, _ in items if t is not None]
-        handle(phone, "\n".join(texts) if texts else None, items[-1][1], any(v for _, _, v in items))
+        texts = [t for t, _, _, _ in items if t is not None]
+        handle(phone, "\n".join(texts) if texts else None, items[-1][1], any(v for _, _, v, _ in items),
+               any(r for _, _, _, r in items))
 
 
-def handle(phone: str, text: str | None, wamid: str, voice: bool = False) -> None:
+def handle(phone: str, text: str | None, wamid: str, voice: bool = False, reacted: bool = False) -> None:
     try:
         t = (text or "").strip()
         if text is None:
@@ -460,7 +487,7 @@ def handle(phone: str, text: str | None, wamid: str, voice: bool = False) -> Non
         elif t.upper().startswith("LINK-") and " " not in t and not voice:
             _redeem(phone, t)  # phone comes from the signed webhook, never from the text
         else:
-            _answer(phone, t, wamid, voice)
+            _answer(phone, t, wamid, voice, reacted)
     except Exception as e:  # never leak details to the user; type only in the log
         logs.event(log, "handler_failed", logging.ERROR, phone=logs.mask_phone(phone), error=type(e).__name__)
         try:
@@ -500,7 +527,11 @@ async def receive(request: Request, bg: BackgroundTasks):
                         logs.event(log, "wa_message", phone=logs.mask_phone(m["from"]), type=m.get("type"))
                         if m.get("type") == "audio" and voice.enabled():
                             _voice[m["id"]] = m["audio"]["id"]
-                        enqueue(m["from"], m["text"]["body"] if m.get("type") == "text" else None, m["id"])
+                        text = m["text"]["body"] if m.get("type") == "text" else None
+                        # roll (and, if it hits, queue the send of) the cosmetic reaction right here, before the
+                        # debounce/token-mint path in process()/_answer() can delay it — see _ambient_react.
+                        reacted = _ambient_react(bg, m["from"], m["id"], text) if text else False
+                        enqueue(m["from"], text, m["id"], reacted)
                         bg.add_task(process, m["from"])
     except (ValueError, KeyError, AttributeError, TypeError):
         logs.event(log, "webhook_rejected", logging.WARNING, reason="bad_payload")

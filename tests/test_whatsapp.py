@@ -125,6 +125,31 @@ def test_pdf_mention_sometimes_gets_thumbs_up_reaction(env, monkeypatch):
     assert [p["reaction"]["message_id"] for p in graphed if p.get("type") == "reaction"] == ["m5"]
 
 
+def test_reaction_fires_before_the_debounce_and_token_mint(env, monkeypatch):
+    """Root cause of the lag we used to have: the reaction was sent deep inside _answer(), after the 5s
+    coalescing debounce AND the per-question OkGhumo token mint. It must now be decided and queued for send
+    straight out of receive(), before either of those ever runs."""
+    env.tokens["919800000001"] = {"role": "vendor", "mcpAccessToken": "t"}
+    order = []
+
+    def graph(p):
+        if p.get("type") == "reaction":
+            order.append("reaction")
+        elif "text" in p:
+            env.sent.append(p)
+    monkeypatch.setattr(w, "_graph", graph)
+    monkeypatch.setattr(w.random, "choice", lambda seq: seq[0])
+    monkeypatch.setattr(w.random, "random", lambda: 0.1)  # hits both the pdf_word (1/2) and chat (1/4) chance
+
+    real_sleep = w.time.sleep
+    monkeypatch.setattr(w.time, "sleep", lambda s: (order.append("debounce_sleep"), real_sleep(0)))
+    real_token = w.token
+    monkeypatch.setattr(w, "token", lambda phone: (order.append("token_mint"), real_token(phone))[1])
+
+    assert post("a pdf please", wamid="m6").status_code == 200
+    assert order[0] == "reaction" and "debounce_sleep" in order and "token_mint" in order
+
+
 def test_follow_up_keeps_same_vendor_context(env):
     env.tokens["919800000001"] = {"role": "vendor", "mcpAccessToken": "t"}
     post("first"); post("second")
@@ -393,7 +418,7 @@ def test_quick_messages_are_answered_as_one_question(env):
     w.enqueue("919800000001", "kya hal chal kesa chal raha he dhandha", "w1")
     w.enqueue("919800000001", "?", "w2")
     seen = []
-    orig, w.handle = w.handle, lambda p, t, i, v=False: seen.append((t, i))
+    orig, w.handle = w.handle, lambda p, t, i, v=False, r=False: seen.append((t, i))
     try:
         w.process("919800000001"); w.process("919800000001")  # second task finds nothing left
     finally:
