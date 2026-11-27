@@ -554,3 +554,9 @@ def test_guard_no_longer_blocks_everyday_share_but_still_blocks_stock_talk():
     ok = lambda t: guard.classify([{"role": "user", "content": t}])  # noqa: E731
     assert ok("Ok share it") is None and ok("share the report with me") is None
     assert ok("what is the share price of tata")[0] == "off_topic" and ok("which stocks should I buy")[0] == "off_topic"
+
+
+def test_every_pdf_page_carries_the_logo():
+    from app import pdfreport
+    pdf = pdfreport.render(pdfreport.parse('{"title":"T","summary":"s","kpis":[],"charts":[],"tables":[],"insights":[]}'))
+    assert pdf.startswith(b"%PDF") and b"/Subtype /Image" in pdf.replace(b"/Subtype/Image", b"/Subtype /Image")

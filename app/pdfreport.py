@@ -216,9 +216,16 @@ def _chart(c: dict, w: float) -> Drawing:
     return d
 
 
+LOGO = os.path.join(os.path.dirname(__file__), "assets", "logo.jpg")  # OkGhumo logo: on every PDF page, used nowhere else
+
+
 def _page(canvas, doc):
-    """Every page: a hairline + footer at the bottom (nothing at the top)."""
+    """Every page: the logo at the top-left, a hairline + footer at the bottom."""
     canvas.saveState()
+    try:
+        canvas.drawImage(LOGO, 2 * cm, A4[1] - 1.75 * cm, width=3.9 * cm, height=3.9 * cm * 414 / 2000, mask="auto")
+    except Exception:  # a missing/corrupt logo must never stop a report
+        pass
     canvas.setStrokeColor(RULE)
     canvas.setLineWidth(.5)
     canvas.line(2 * cm, 1.55 * cm, A4[0] - 2 * cm, 1.55 * cm)
@@ -284,7 +291,7 @@ def render(spec: dict, generated: str | None = None) -> bytes:
     if spec["insights"]:
         story += H2("Key insights") + [P(x, ins, bulletText="\u2022") for x in spec["insights"]]
     buf = io.BytesIO()
-    SimpleDocTemplate(buf, pagesize=A4, leftMargin=2 * cm, rightMargin=2 * cm, topMargin=2 * cm, bottomMargin=2.1 * cm,
+    SimpleDocTemplate(buf, pagesize=A4, leftMargin=2 * cm, rightMargin=2 * cm, topMargin=2.5 * cm, bottomMargin=2.1 * cm,
                       title=spec["title"], author="AI Assistant").build(story, onFirstPage=_page, onLaterPages=_page)
     pdf = buf.getvalue()
     if len(pdf) > MAX_PDF_BYTES:
