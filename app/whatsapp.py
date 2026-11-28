@@ -138,10 +138,10 @@ def pick_reaction(text: str) -> str:
     return random.choice(DEFAULT_REACTIONS)
 
 
-def _maybe_react(phone: str, wamid: str, why: str, chance: float = 1 / 2, text: str = "") -> bool:
-    """Cosmetic reaction (see pick_reaction) with the given chance (PDF messages 1/2, other messages 1/4), never required and never raises. The outcome is logged (never any text) so a
+def _maybe_react(phone: str, wamid: str, why: str, chance: float | None = None, text: str = "") -> bool:
+    """Cosmetic reaction (see pick_reaction) with REACT_CHANCE (default 1 = always), never required and never raises. The outcome is logged (never any text) so a
     missing reaction is explainable: skipped_dice = the roll said no, sent = Meta accepted it, failed = Meta refused."""
-    if random.random() >= chance:
+    if random.random() >= (REACT_CHANCE if chance is None else chance):
         logs.event(log, "reaction", phone=logs.mask_phone(phone), why=why, outcome="skipped_dice")
         return False
     try:
@@ -153,15 +153,17 @@ def _maybe_react(phone: str, wamid: str, why: str, chance: float = 1 / 2, text: 
         return False
 
 
+REACT_CHANCE = float(os.environ.get("WA_REACT_CHANCE", "1"))  # every inbound message gets a reaction; lower it (0-1) to make it occasional
+
+
 def _ambient_react(bg: BackgroundTasks, phone: str, wamid: str, text: str) -> bool:
     """Roll the cosmetic-reaction dice right when the message arrives — before the coalescing debounce
     (WA_DEBOUNCE_S, default 5s) and the per-question OkGhumo token mint, which together used to delay every
     reaction by several seconds. Only the actual Meta send (network) is handed to a background task, so Meta's
     webhook ack is still immediate. Returns whether a send was scheduled, so _answer()'s pdf-actually-sent
     catch-up reaction doesn't fire twice for the same message."""
-    asked_pdf = bool(PDF_WORDS.search(text))
-    why, chance = ("pdf_word", 1 / 2) if asked_pdf else ("chat", 1 / 4)
-    if random.random() >= chance:
+    why = "pdf_word" if PDF_WORDS.search(text) else "chat"
+    if random.random() >= REACT_CHANCE:
         logs.event(log, "reaction", phone=logs.mask_phone(phone), why=why, outcome="skipped_dice")
         return False
     emoji = pick_reaction(text)
@@ -322,7 +324,7 @@ def _answer(phone: str, text: str, wamid: str, voice: bool = False, reacted: boo
             send(phone, "Sorry, I couldn't attach the PDF just now. Please ask me again in a minute, or I can share the key figures here.")
         else:
             if not asked_pdf and not reacted:  # no "pdf" in the message (e.g. "and another of the months sales"), but one was sent
-                _maybe_react(phone, wamid, "pdf_sent", 1 / 2, text)
+                _maybe_react(phone, wamid, "pdf_sent", text=text)
 
 
 # ---- scheduled delivery ----
@@ -530,7 +532,7 @@ async def receive(request: Request, bg: BackgroundTasks):
                         text = m["text"]["body"] if m.get("type") == "text" else None
                         # roll (and, if it hits, queue the send of) the cosmetic reaction right here, before the
                         # debounce/token-mint path in process()/_answer() can delay it — see _ambient_react.
-                        reacted = _ambient_react(bg, m["from"], m["id"], text) if text else False
+                        reacted = _ambient_react(bg, m["from"], m["id"], text or "")  # every type (text, voice, media) gets one
                         enqueue(m["from"], text, m["id"], reacted)
                         bg.add_task(process, m["from"])
     except (ValueError, KeyError, AttributeError, TypeError):

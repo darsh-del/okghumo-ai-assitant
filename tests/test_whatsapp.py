@@ -96,33 +96,20 @@ def test_two_vendors_never_share_token_or_history(env):
     assert all("A secret" not in m["content"] for m in b["messages"])
 
 
-def test_pdf_mention_sometimes_gets_thumbs_up_reaction(env, monkeypatch):
+def test_every_message_gets_a_reaction(env, monkeypatch):
     env.tokens["919800000001"] = {"role": "vendor", "mcpAccessToken": "t"}
     graphed = []
     monkeypatch.setattr(w, "_graph", lambda p: graphed.append(p))
-
     monkeypatch.setattr(w.random, "choice", lambda seq: seq[0])
-    monkeypatch.setattr(w.random, "random", lambda: 0.1)  # inside the 1/3 chance
-    post("can I get a pdf report", wamid="m1")
-    reactions = [p for p in graphed if p.get("type") == "reaction"]
-    assert reactions == [{"to": "919800000001", "type": "reaction",
-                          "reaction": {"message_id": "m1", "emoji": "📄"}}]
-
+    monkeypatch.setattr(w.random, "random", lambda: 0.99)  # the dice can never say no by default
+    for i, txt in enumerate(["can I get a pdf report", "what are my sales", "thanks"]):
+        graphed.clear()
+        post(txt, wamid=f"m{i}")
+        assert [p["reaction"]["message_id"] for p in graphed if p.get("type") == "reaction"] == [f"m{i}"]
     graphed.clear()
-    monkeypatch.setattr(w.random, "random", lambda: 0.9)  # outside the 1/3 chance
-    post("another pdf please", wamid="m2")
+    monkeypatch.setattr(w, "REACT_CHANCE", 0.5)  # the knob still works if someone wants it occasional
+    post("another one", wamid="mx")
     assert not [p for p in graphed if p.get("type") == "reaction"]
-
-    graphed.clear()
-    monkeypatch.setattr(w.random, "random", lambda: 0.4)  # inside PDF's 1/2, outside others' 1/4
-    post("a pdf again", wamid="m4")
-    assert [p["reaction"]["message_id"] for p in graphed if p.get("type") == "reaction"] == ["m4"]
-    graphed.clear()
-    post("what are my sales", wamid="m3")  # other messages react less often (1/4)
-    assert not [p for p in graphed if p.get("type") == "reaction"]
-    monkeypatch.setattr(w.random, "random", lambda: 0.1)
-    post("what are my bookings", wamid="m5")
-    assert [p["reaction"]["message_id"] for p in graphed if p.get("type") == "reaction"] == ["m5"]
 
 
 def test_reaction_fires_before_the_debounce_and_token_mint(env, monkeypatch):
@@ -616,25 +603,16 @@ def test_wa_scheduled_pdf_report_is_delivered_as_document_then_held_if_window_cl
     assert len(docs.docs) == 1 and dbrun("SELECT sent FROM inbox")[0]["sent"] == 1
 
 
-def test_reaction_outcomes_are_logged_and_pdf_sent_also_reacts(docs, monkeypatch, caplog):
+def test_reaction_outcomes_are_logged(docs, monkeypatch, caplog):
     graphed = []
     monkeypatch.setattr(w, "_graph", lambda p: graphed.append(p))
     caplog.set_level("INFO")
     logged = lambda: caplog.text.replace('"', '')  # the log formatter quotes some values, not others  # noqa: E731
-    # a PDF is actually sent although the message never says "pdf": still eligible for the 👍
-    monkeypatch.setattr(w.random, "random", lambda: 0.4)  # misses the 1/4 chat roll, hits the 1/2 pdf_sent roll
-    docs.model = Script([NS(type="tool_use", id="t", name="create_pdf_report", input={"question": "q"})], [T(SPECJ)], [T("Ready!")])
-    post("and another of the months sales please", wamid="m9")
-    assert [p["reaction"]["message_id"] for p in graphed if p.get("type") == "reaction"] == ["m9"] and docs.docs
-    assert 'outcome=sent' in logged() and 'why=pdf_sent' in logged()
-    # the dice say no: nothing sent, but the skip is logged
-    graphed.clear(); caplog.clear()
-    monkeypatch.setattr(w.random, "random", lambda: 0.9)
-    post("a pdf please", wamid="m10")
-    assert not [p for p in graphed if p.get("type") == "reaction"] and 'outcome=skipped_dice' in logged()
+    post("a pdf please", wamid="m9")
+    assert [p["reaction"]["message_id"] for p in graphed if p.get("type") == "reaction"] == ["m9"]
+    assert 'outcome=sent' in logged() and 'why=pdf_word' in logged()
     # Meta refuses the reaction: the reply still goes out, and the failure is logged (type only)
     caplog.clear()
-    monkeypatch.setattr(w.random, "random", lambda: 0.1)
     def boom(p):
         if p.get("type") == "reaction": raise httpx.ConnectError("x")
     monkeypatch.setattr(w, "_graph", boom)
